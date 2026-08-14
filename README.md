@@ -123,12 +123,18 @@ Finished games are appended to `data/games.jsonl` and shown under the History ta
 with a win/loss/draw record. The archive stores the **move list**, not a board, so
 a game replays exactly and can be re-analysed later by a stronger search.
 
-JSONL rather than SQLite, deliberately: an append cannot corrupt games already
-written, a truncated final line is simply skipped on load, unknown fields from a
-newer version are ignored, and the file is readable without the program. A disk
-failure degrades durability and nothing else — the in-memory copy is stored before
-the write is attempted, so a logging problem can never lose the game you just
-played.
+JSONL rather than SQLite, deliberately: a crash mid-append costs the line being
+written and leaves every earlier game intact, a truncated final line is simply
+skipped on load, unknown fields from a newer version are ignored, and the file is
+readable without the program.
+
+The durability guarantee is worth stating exactly, because the honest version is
+narrower than "cannot lose a game". A game is held in memory the moment it ends
+and written immediately after, so a failed write — full disk, unwritable path —
+leaves it visible and replayable for the rest of that process, and is logged
+rather than swallowed. It is **durable only once the write succeeds**: a game
+whose write failed is gone after a restart. What the format buys is that its loss
+is confined to itself.
 
 ## Layout
 
@@ -156,7 +162,12 @@ differently:
 | `CONNECT4_HOST` / `CONNECT4_PORT` | `127.0.0.1` / `8000` | where to serve |
 | `CONNECT4_TIME_LIMIT` | `2.0` | search budget per move, seconds |
 | `CONNECT4_SOLVER_TIME_LIMIT` | `12.0` | budget in solver mode |
-| `CONNECT4_HISTORY` | `data/games.jsonl` | game archive; unset path disables disk |
+| `CONNECT4_HISTORY` | `data/games.jsonl` | where the game archive is written |
+
+`CONNECT4_HISTORY` has three states, not two: unset uses the default file, a
+path writes there, and an **empty** value keeps games in memory only and never
+touches the disk — which is what a shared machine or a throwaway container
+wants.
 
 ### The two claims worth checking first
 
