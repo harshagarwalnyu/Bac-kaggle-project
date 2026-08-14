@@ -20,6 +20,7 @@ on screen -- the analysis is attached to the position it describes.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -32,17 +33,37 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from connect4.bitboard import WIDTH, Position
-from connect4.engine import Analysis, Engine, heuristic_evaluator
+from connect4.engine import MAX_PLIES, Analysis, Engine, heuristic_evaluator
+from connect4.history import GameHistory
 from connect4.model import MLP, NeuralEvaluator
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "models" / "evaluator.npz"
 STATIC_DIR = ROOT / "web"
+HISTORY_PATH = Path(os.environ.get("CONNECT4_HISTORY", ROOT / "data" / "games.jsonl"))
 
 # Games are held in memory. That is the right call for a single-player local
 # app -- a database would be ceremony around a dict -- but memory is finite, so
 # the oldest games are evicted rather than trusted to be cleaned up.
 MAX_GAMES = 200
+
+# Seconds the bot may think per move. Tunable because the right value is a
+# property of the machine and the audience, not of the code: a demo wants two
+# seconds of visible deliberation, a test suite wants none of it.
+TIME_LIMIT_S = float(os.environ.get("CONNECT4_TIME_LIMIT", "2.0"))
+MAX_DEPTH = int(os.environ.get("CONNECT4_MAX_DEPTH", str(MAX_PLIES)))
+
+# Skill 6 is a separate mode, not another notch on the same dial, and it gets
+# its own engine because the difference is the *budget*, not the move choice.
+# Connect 4 is a solved game -- the first player wins by move 41 with perfect
+# play -- but proving that from an empty board takes billions of nodes, which
+# CPython is not going to do inside a web request. What this budget does buy is
+# real: from roughly the eighth stone onward the search resolves whole lines
+# exactly, and the UI says "proven" only when it genuinely did. Overclaiming a
+# solve would be the one dishonest thing this project could ship.
+SOLVER_TIME_LIMIT_S = float(os.environ.get("CONNECT4_SOLVER_TIME_LIMIT", "12.0"))
+SOLVER_SKILL = 6
+MAX_SKILL = SOLVER_SKILL
 
 HUMAN, BOT = 1, 2
 
@@ -95,7 +116,7 @@ class Store:
 
 
 class NewGameRequest(BaseModel):
-    skill: int = Field(default=5, ge=0, le=5)
+    skill: int = Field(default=5, ge=0, le=MAX_SKILL)
     bot_first: bool = False
 
 
@@ -108,7 +129,7 @@ class MoveRequest(BaseModel):
 class BotMoveRequest(BaseModel):
     # Per-request rather than per-game, so the difficulty dial takes effect on
     # the very next move instead of the next game.
-    skill: int | None = Field(default=None, ge=0, le=5)
+    skill: int | None = Field(default=None, ge=0, le=MAX_SKILL)
 
 
 # --------------------------------------------------------------------------
@@ -137,11 +158,16 @@ def describe_game(game: Game) -> dict:
         "grid": pos.to_grid(),
         "ply": pos.moves,
         "turn": 0 if status != "playing" else pos.current_player(),
-        "legal_moves": [] if status != "playing" else pos.legal_moves(),
+        # Sorted, because ``legal_moves`` comes back centre-first -- that
+        # ordering is a search optimisation (it makes alpha-beta cut early) and
+        # has no business leaking into the wire format, where the only sensible
+        # order is the one the client draws.
+        "legal_moves": [] if status != "playing" else sorted(pos.legal_moves()),
         "status": status,
         "winner": winner,
         "bot_player": game.bot_player,
         "skill": game.skill,
+        "solver": game.skill >= SOLVER_SKILL,
         "last_move": game.moves[-1] if game.moves else None,
     }
 
@@ -241,24 +267,75 @@ async def lifespan(app: FastAPI):
     # opinion on every column, next to the search's, and the UI shows both.
     app.state.engine = Engine(
         evaluator=heuristic_evaluator,
-        max_depth=12,
-        time_limit_s=2.0,
+        max_depth=MAX_DEPTH,
+        time_limit_s=TIME_LIMIT_S,
     )
+
+    # Solver mode. Same code, two changes that matter: six times the clock, and
+    # a transposition table that survives between moves. The second is the
+    # bigger of the two -- consecutive searches in one game overlap enormously,
+    # so keeping the table turns each move into a continuation of the last
+    # rather than a fresh start.
+    app.state.solver = Engine(
+        evaluator=heuristic_evaluator,
+        max_depth=MAX_PLIES,
+        time_limit_s=SOLVER_TIME_LIMIT_S,
+        persist_table=True,
+    )
+
     app.state.store = Store()
+    app.state.history = GameHistory(HISTORY_PATH)
     yield
 
 
 app = FastAPI(title="Connect 4 glass-box bot", lifespan=lifespan)
 
 
-def _analysis_payload(pos: Position) -> dict | None:
+def _engine_for(skill: int) -> Engine:
+    """Solver mode gets the long-budget engine; every other skill gets the
+    normal one. Difficulty below 5 is chosen from the *same* honest analysis,
+    so there is no reason to think less about it."""
+    return app.state.solver if skill >= SOLVER_SKILL else app.state.engine
+
+
+def _analysis_payload(pos: Position, skill: int = 5) -> dict | None:
     """Analyse ``pos``, or return ``None`` if the game is already over."""
     if pos.has_won() or pos.is_draw():
         return None
-    analysis = app.state.engine.analyse(pos)
+    analysis = _engine_for(skill).analyse(pos)
     # With no trained model the engine still has plenty to say; the dataset
     # panel simply reports nothing rather than the server refusing to answer.
     return describe_analysis(analysis, pos, app.state.evaluator or _NULL_EVALUATOR)
+
+
+def _archive(game: Game) -> None:
+    """Log a game the moment it ends. No-op while it is still being played, and
+    idempotent afterwards, so it is safe to call on every response."""
+    described = describe_game(game)
+    if described["status"] == "playing":
+        return
+    app.state.history.record(
+        game_id=game.id,
+        moves=game.moves,
+        winner=described["winner"],
+        bot_player=game.bot_player,
+        skill=game.skill,
+        started=game.created,
+    )
+
+
+def _respond(game: Game, **extra) -> dict:
+    """The one shape every game endpoint returns.
+
+    Centralised so that "archive finished games" is a property of the API
+    rather than a line four handlers have to remember to copy.
+    """
+    _archive(game)
+    return {
+        "game": describe_game(game),
+        "analysis": _analysis_payload(game.position, game.skill),
+        **extra,
+    }
 
 
 class _NullEvaluator:
@@ -276,7 +353,14 @@ _NULL_EVALUATOR = _NullEvaluator()
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "model_loaded": app.state.model_loaded}
+    return {
+        "ok": True,
+        "model_loaded": app.state.model_loaded,
+        "max_skill": MAX_SKILL,
+        "solver_skill": SOLVER_SKILL,
+        "time_limit_s": TIME_LIMIT_S,
+        "solver_time_limit_s": SOLVER_TIME_LIMIT_S,
+    }
 
 
 @app.post("/api/games")
@@ -285,13 +369,12 @@ def new_game(request: NewGameRequest) -> dict:
         skill=request.skill,
         bot_player=HUMAN if request.bot_first else BOT,
     )
-    return {"game": describe_game(game), "analysis": _analysis_payload(game.position)}
+    return _respond(game)
 
 
 @app.get("/api/games/{game_id}")
 def get_game(game_id: str) -> dict:
-    game = app.state.store.get(game_id)
-    return {"game": describe_game(game), "analysis": _analysis_payload(game.position)}
+    return _respond(app.state.store.get(game_id))
 
 
 @app.post("/api/games/{game_id}/moves")
@@ -305,7 +388,7 @@ def play_move(game_id: str, request: MoveRequest) -> dict:
         raise HTTPException(status_code=409, detail=f"column {request.column} is full")
 
     game.moves.append(request.column)
-    return {"game": describe_game(game), "analysis": _analysis_payload(game.position)}
+    return _respond(game)
 
 
 @app.post("/api/games/{game_id}/bot-move")
@@ -323,7 +406,7 @@ def bot_move(game_id: str, request: BotMoveRequest) -> dict:
     # it for a move and then separately analysing the same position would pay
     # for the search twice and could -- if anything were nondeterministic --
     # report an opinion that did not match the move played.
-    analysis = app.state.engine.analyse(pos)
+    analysis = _engine_for(game.skill).analyse(pos)
     column = _pick(analysis, game.skill)
     if column < 0:
         raise HTTPException(status_code=409, detail="no legal move")
@@ -333,12 +416,7 @@ def bot_move(game_id: str, request: BotMoveRequest) -> dict:
     )
     game.moves.append(column)
 
-    return {
-        "game": describe_game(game),
-        "played": column,
-        "played_analysis": played_analysis,
-        "analysis": _analysis_payload(game.position),
-    }
+    return _respond(game, played=column, played_analysis=played_analysis)
 
 
 def _pick(analysis: Analysis, skill: int) -> int:
@@ -381,7 +459,58 @@ def undo(game_id: str) -> dict:
     for _ in range(2):
         if game.moves:
             game.moves.pop()
-    return {"game": describe_game(game), "analysis": _analysis_payload(game.position)}
+    return _respond(game)
+
+
+# --------------------------------------------------------------------------
+# History
+# --------------------------------------------------------------------------
+
+
+def describe_record(record) -> dict:
+    """A past game, in list form.
+
+    The move list travels with every entry because it is what makes the record
+    useful rather than decorative: the client can replay a game, and
+    ``POST /api/history/{id}/rematch`` can resume from it.
+    """
+    return {
+        "id": record.id,
+        "moves": record.moves,
+        "plies": record.plies,
+        "winner": record.winner,
+        "outcome": record.outcome,
+        "bot_player": record.bot_player,
+        "skill": record.skill,
+        "solver": record.skill >= SOLVER_SKILL,
+        "started": record.started,
+        "ended": record.ended,
+        "duration_s": round(max(0.0, record.ended - record.started), 1),
+    }
+
+
+@app.get("/api/history")
+def list_history(limit: int = 25) -> dict:
+    limit = max(1, min(limit, 200))
+    history: GameHistory = app.state.history
+    return {
+        "summary": history.summary(),
+        "games": [describe_record(r) for r in history.recent(limit)],
+    }
+
+
+@app.get("/api/history/{record_id}")
+def get_history_entry(record_id: str) -> dict:
+    record = app.state.history.get(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="no such archived game")
+    return describe_record(record)
+
+
+@app.delete("/api/history")
+def clear_history() -> dict:
+    app.state.history.clear()
+    return {"cleared": True, "summary": app.state.history.summary()}
 
 
 if STATIC_DIR.exists():
@@ -395,7 +524,12 @@ if STATIC_DIR.exists():
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(
+        app,
+        host=os.environ.get("CONNECT4_HOST", "127.0.0.1"),
+        port=int(os.environ.get("CONNECT4_PORT", "8000")),
+        log_level="info",
+    )
 
 
 if __name__ == "__main__":
