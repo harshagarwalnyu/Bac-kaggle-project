@@ -141,12 +141,33 @@ class Engine:
     def __init__(
         self,
         evaluator: Evaluator | None = None,
-        max_depth: int = 12,
+        max_depth: int = MAX_PLIES,
         time_limit_s: float = 2.0,
+        persist_table: bool = False,
+        table_capacity: int = 1_200_000,
     ) -> None:
+        # The default cap is the length of the whole game, which means the
+        # *clock* is the real governor and the cap only exists to bound the
+        # recursion. An arbitrary cap like 12 looks harmless and is not: past
+        # the midgame the tree narrows enough that depth 12 finishes in ~25ms
+        # of a 2000ms budget, so the engine would sit on 99% of its thinking
+        # time and play a blind endgame -- precisely the phase where a human
+        # sets up the double threat that wins the game. Uncapped, the same
+        # position reaches depth 27.
+        #
+        # ``persist_table`` keeps the transposition table between calls to
+        # ``analyse``. Entries are keyed by position, not by search, so reuse is
+        # sound -- and in a real game the next search re-visits an enormous
+        # fraction of the previous one's tree, two plies deeper. It is the
+        # single cheapest way to make the solver mode actually reach proofs.
+        # The cost is memory, so the table is capped and dropped wholesale when
+        # it overflows (simpler than an eviction policy, and a fresh table is
+        # correct, merely slower).
         self.evaluator = evaluator or heuristic_evaluator
         self.max_depth = max_depth
         self.time_limit_s = time_limit_s
+        self.persist_table = persist_table
+        self.table_capacity = table_capacity
         self._table: dict[int, tuple[int, float, int, bool]] = {}
         self._stats = SearchStats()
         self._deadline = 0.0
@@ -162,7 +183,8 @@ class Engine:
         every column is the entire premise of the glass-box UI.
         """
         start = time.perf_counter()
-        self._table.clear()
+        if not self.persist_table or len(self._table) > self.table_capacity:
+            self._table.clear()
         self._stats = SearchStats()
         self._deadline = start + self.time_limit_s
 
