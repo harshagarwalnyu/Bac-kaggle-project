@@ -118,6 +118,13 @@ class Store:
 class NewGameRequest(BaseModel):
     skill: int = Field(default=5, ge=0, le=MAX_SKILL)
     bot_first: bool = False
+    # An opening to start from, as a list of columns. This is what makes a
+    # position shareable and a saved game resumable, and it exists because a
+    # game here *is* its move list -- replaying one is the only way to reach a
+    # position without inventing a second, board-shaped way to describe one.
+    # Illegal sequences are rejected outright rather than clamped, so a typo
+    # cannot quietly produce a different position than the one asked for.
+    moves: list[int] | None = None
 
 
 class MoveRequest(BaseModel):
@@ -299,10 +306,21 @@ def _engine_for(skill: int) -> Engine:
 
 
 def _analysis_payload(pos: Position, skill: int = 5) -> dict | None:
-    """Analyse ``pos``, or return ``None`` if the game is already over."""
+    """Analyse ``pos``, or return ``None`` if the game is already over.
+
+    This is the *advisory* search -- what the panel shows and what the assist
+    toggle recommends -- not the search the bot moved on. It is deliberately
+    capped at the normal budget even in solver mode: otherwise a single
+    bot-move request pays the solver's long clock twice, once to choose the
+    move and once to describe the position it created, and the user waits
+    twice as long for no extra strength in the move actually played.
+
+    The solver engine is still the one asked, so the advisory search inherits
+    its warm transposition table and is far cheaper than a cold one.
+    """
     if pos.has_won() or pos.is_draw():
         return None
-    analysis = _engine_for(skill).analyse(pos)
+    analysis = _engine_for(skill).analyse(pos, time_limit_s=TIME_LIMIT_S)
     # With no trained model the engine still has plenty to say; the dataset
     # panel simply reports nothing rather than the server refusing to answer.
     return describe_analysis(analysis, pos, app.state.evaluator or _NULL_EVALUATOR)
@@ -365,10 +383,22 @@ def health() -> dict:
 
 @app.post("/api/games")
 def new_game(request: NewGameRequest) -> dict:
+    opening = list(request.moves or ())
+    if opening:
+        # Validated before any state is created, so a rejected opening leaves
+        # no half-built game behind. ``from_moves`` is the single authority on
+        # what a legal sequence is; re-implementing that check here would be a
+        # second definition of legality waiting to disagree with the first.
+        try:
+            Position.from_moves(opening)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
     game = app.state.store.create(
         skill=request.skill,
         bot_player=HUMAN if request.bot_first else BOT,
     )
+    game.moves.extend(opening)
     return _respond(game)
 
 
@@ -384,6 +414,12 @@ def play_move(game_id: str, request: MoveRequest) -> dict:
 
     if pos.has_won() or pos.is_draw():
         raise HTTPException(status_code=409, detail="the game is already over")
+    if pos.current_player() == game.bot_player:
+        # Without this, a client can post twice in a row and play both sides:
+        # the handler alternates players implicitly from the move count, so the
+        # second move is silently accepted as the bot's. That is not a
+        # hypothetical -- a double-click on a column does it.
+        raise HTTPException(status_code=409, detail="it is not your turn")
     if not pos.can_play(request.column):
         raise HTTPException(status_code=409, detail=f"column {request.column} is full")
 
@@ -398,6 +434,11 @@ def bot_move(game_id: str, request: BotMoveRequest) -> dict:
 
     if pos.has_won() or pos.is_draw():
         raise HTTPException(status_code=409, detail="the game is already over")
+    if pos.current_player() != game.bot_player:
+        # The mirror of the check in ``play_move``. A bot-move request that
+        # arrives on the human's turn used to be honoured, which let a retry or
+        # a stray click hand the bot two plies in a row.
+        raise HTTPException(status_code=409, detail="it is not the bot's turn")
 
     if request.skill is not None:
         game.skill = request.skill
@@ -439,26 +480,47 @@ def _pick(analysis: Analysis, skill: int) -> int:
     index = min(5 - skill, len(ranked) - 1)
     candidate = ranked[index]
 
+    def losing(move) -> bool:
+        return bool(move.exact and move.score < 0 and (move.mate_in or 99) <= 2)
+
     # Floor 2: never walk into a loss the bot can see when something safe
     # exists -- weaker play, not suicidal play.
-    if candidate.exact and candidate.score < 0 and (candidate.mate_in or 99) <= 2:
-        for alternative in ranked:
-            if not (alternative.exact and alternative.score < 0
-                    and (alternative.mate_in or 99) <= 2):
-                return alternative.column
+    #
+    # Searching *outward* from the candidate, not from the top of the list.
+    # Scanning from index 0 finds the strongest safe move, which means the
+    # easiest setting starts playing perfectly at exactly the moment the
+    # position gets sharp -- the opposite of what the dial promises. Walking
+    # out from where difficulty put us keeps the replacement as close to that
+    # strength as safety allows.
+    if losing(candidate):
+        for offset in range(1, len(ranked)):
+            for probe in (index + offset, index - offset):
+                if 0 <= probe < len(ranked) and not losing(ranked[probe]):
+                    return ranked[probe].column
     return candidate.column
 
 
 @app.post("/api/games/{game_id}/undo")
 def undo(game_id: str) -> dict:
-    """Take back a full turn: the human's move and the bot's reply.
+    """Take back a full turn, so that it is the human's move again.
 
-    Popping a single ply would hand the turn to the wrong player, so both go.
+    Popping a fixed two plies is wrong whenever the bot moved first: that game
+    goes bot, human, bot, human, so two pops from an even-length list land on
+    the bot's turn and quietly delete its opening move as well. Popping until
+    the turn comes back round states the actual intent, and it is correct for
+    both openings without needing to know which one this is.
+
+    At least one ply always goes, otherwise "undo" on the human's own turn --
+    which is when the button is reachable -- would do nothing at all.
     """
     game = app.state.store.get(game_id)
-    for _ in range(2):
-        if game.moves:
-            game.moves.pop()
+    human = 3 - game.bot_player
+
+    if game.moves:
+        game.moves.pop()
+    while game.moves and game.position.current_player() != human:
+        game.moves.pop()
+
     return _respond(game)
 
 
@@ -505,6 +567,51 @@ def get_history_entry(record_id: str) -> dict:
     if record is None:
         raise HTTPException(status_code=404, detail="no such archived game")
     return describe_record(record)
+
+
+class RematchRequest(BaseModel):
+    """How much of the archived game to take back into the new one.
+
+    ``ply`` counts from the start, so 0 replays nothing (same opening, same
+    colours, empty board) and omitting it replays everything up to the move
+    before the game ended -- the position you would want to think about again.
+    """
+
+    ply: int | None = Field(default=None, ge=0)
+
+
+@app.post("/api/history/{record_id}/rematch")
+def rematch(record_id: str, request: RematchRequest) -> dict:
+    """Start a fresh game from an archived one.
+
+    The archive stores move lists rather than boards precisely so that this is
+    possible, and the endpoint was named in ``describe_record`` before it
+    existed. Replaying the moves through the normal ``Game`` object -- rather
+    than restoring a board -- means the new game is an ordinary game in every
+    respect: it can be undone, analysed and archived like any other.
+
+    Colours and difficulty are inherited, because a rematch you win by quietly
+    switching sides is not a rematch.
+    """
+    record = app.state.history.get(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="no such archived game")
+
+    # One ply short of the end by default: replaying the whole thing would hand
+    # back a game that is already over, which is the one position from which a
+    # rematch cannot be played.
+    default_ply = max(0, len(record.moves) - 1)
+    ply = default_ply if request.ply is None else min(request.ply, len(record.moves))
+
+    game = app.state.store.create(skill=record.skill, bot_player=record.bot_player)
+    game.moves.extend(record.moves[:ply])
+
+    if game.position.has_won():
+        # Only reachable when the caller asked for the full move list of a game
+        # that ended in a win. Refuse rather than hand back a dead game.
+        raise HTTPException(status_code=409, detail="that ply is already a finished game")
+
+    return _respond(game, replayed_from=record_id, replayed_plies=ply)
 
 
 @app.delete("/api/history")

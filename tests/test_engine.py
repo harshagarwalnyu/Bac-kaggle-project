@@ -249,6 +249,60 @@ def test_time_limit_is_respected():
     assert analysis.best_move in range(WIDTH)
 
 
+def test_a_per_call_budget_overrides_the_engine_default():
+    """The advisory search borrows the solver's warm table, not its clock."""
+    engine = Engine(max_depth=42, time_limit_s=30.0)
+    analysis = engine.analyse(Position(), time_limit_s=0.3)
+    assert analysis.stats.elapsed_ms < 2500, "the per-call budget was ignored"
+
+
+def test_an_aborted_search_names_a_move_without_inventing_a_variation():
+    """A budget too small to finish depth 1 leaves nothing scored.
+
+    Callers still need something playable, but a principal variation through a
+    position that was never searched is invention -- and the UI would draw it
+    with exactly the same confidence as a real one.
+    """
+    engine = Engine(max_depth=42, time_limit_s=0.0)
+    analysis = engine.analyse(Position())
+
+    assert analysis.best_move in range(WIDTH)
+    if not analysis.evaluations:
+        assert analysis.principal_variation == []
+
+
+def test_concurrent_searches_do_not_corrupt_each_other():
+    """FastAPI runs synchronous handlers in a threadpool and the app shares one
+    engine, so two requests really do land in ``analyse`` at once. Without the
+    lock, one search resets the other's deadline and stats mid-flight."""
+    import threading
+
+    engine = Engine(max_depth=8, time_limit_s=0.4)
+    results: list = []
+    errors: list = []
+
+    def search(moves):
+        try:
+            results.append(engine.analyse(Position.from_moves(moves)))
+        except Exception as error:  # pragma: no cover - the failure being tested
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=search, args=(moves,))
+        for moves in ([3], [3, 3], [2, 4], [3, 2, 4], [0], [1])
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, f"concurrent searches raised: {errors}"
+    assert len(results) == len(threads)
+    for analysis in results:
+        assert analysis.best_move in range(WIDTH)
+        assert analysis.stats.nodes > 0, "a search was robbed of its own statistics"
+
+
 def test_no_legal_moves_on_a_full_board():
     pos = Position()
     order = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
