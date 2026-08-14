@@ -159,7 +159,7 @@ src/connect4/
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          279 tests
+tests/          282 tests
 ```
 
 ### Configuration
@@ -211,7 +211,7 @@ entirely. Accuracy alone would have hidden that completely.
 
 ```bash
 uv sync
-uv run python -m pytest              # 279 tests
+uv run python -m pytest              # 282 tests
 uv run python -m scripts.train       # downloads the data, trains, prints baselines
 uv run python -m scripts.validate    # the three experiments above
 uv run python -m connect4.api        # play
