@@ -19,10 +19,21 @@ tests would have caught a wrong evaluator being wired in.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
-from connect4.api import HUMAN, MAX_GAMES, SOLVER_SKILL, Store, _pick, app
+from connect4.api import (
+    HUMAN,
+    MAX_GAMES,
+    ROOT,
+    SOLVER_SKILL,
+    Store,
+    _history_path,
+    _pick,
+    app,
+)
 from connect4.bitboard import HEIGHT, WIDTH, Position
 from connect4.engine import Analysis, MoveEvaluation
 from connect4.history import GameHistory
@@ -722,6 +733,26 @@ def test_a_rematch_of_the_whole_finished_game_is_refused(client):
         json={"ply": len(archived["moves"])},
     )
     assert response.status_code == 409
+
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+
+def test_history_defaults_to_a_file_and_can_be_turned_off(monkeypatch):
+    """Unset, set, and set-but-empty are three different answers."""
+    monkeypatch.delenv("CONNECT4_HISTORY", raising=False)
+    assert _history_path() == ROOT / "data" / "games.jsonl"
+
+    monkeypatch.setenv("CONNECT4_HISTORY", "/somewhere/else.jsonl")
+    assert _history_path() == Path("/somewhere/else.jsonl")
+
+    # Empty means memory only. Path("") would write to the working directory,
+    # which is the least useful reading of "I do not want a file".
+    monkeypatch.setenv("CONNECT4_HISTORY", "   ")
+    assert _history_path() is None
+    assert GameHistory(_history_path()).path is None
 
 
 def test_a_rematch_of_an_unknown_game_is_a_404(client):

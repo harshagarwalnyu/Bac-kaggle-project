@@ -40,7 +40,23 @@ from connect4.model import MLP, NeuralEvaluator
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "models" / "evaluator.npz"
 STATIC_DIR = ROOT / "web"
-HISTORY_PATH = Path(os.environ.get("CONNECT4_HISTORY", ROOT / "data" / "games.jsonl"))
+def _history_path() -> Path | None:
+    """Where finished games are archived, or ``None`` for memory only.
+
+    Three states, not two. Unset means the default file, because a demo that
+    silently forgets every game is the worse default. An *empty* value means
+    "do not touch the disk at all" -- the only way to say that, and the thing
+    a shared machine or a throwaway container actually wants. ``Path("")``
+    would otherwise quietly resolve to the current directory and write there,
+    which is the least helpful reading of an empty setting available.
+    """
+    configured = os.environ.get("CONNECT4_HISTORY")
+    if configured is None:
+        return ROOT / "data" / "games.jsonl"
+    return Path(configured) if configured.strip() else None
+
+
+HISTORY_PATH = _history_path()
 
 # Games are held in memory. That is the right call for a single-player local
 # app -- a database would be ceremony around a dict -- but memory is finite, so
