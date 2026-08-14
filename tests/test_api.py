@@ -626,6 +626,39 @@ def test_the_bot_will_not_move_out_of_turn(client):
     assert client.get(f"/api/games/{game_id}").json()["game"]["moves"] == []
 
 
+def test_simultaneous_moves_on_one_game_produce_exactly_one_ply(client):
+    """The turn check and the append have to be one indivisible step.
+
+    FastAPI runs synchronous handlers in a threadpool, so these really do run
+    at the same time. Checking whose turn it is and *then* appending lets both
+    requests read the same empty board, both conclude it is the human's turn,
+    and both append -- one click, two plies, and the human has played the bot's
+    move for it.
+    """
+    import threading
+
+    game_id = new_game(client)["game"]["id"]
+    start = threading.Barrier(6)
+    codes: list[int] = []
+    guard = threading.Lock()
+
+    def play():
+        start.wait()
+        response = client.post(f"/api/games/{game_id}/moves", json={"column": 3})
+        with guard:
+            codes.append(response.status_code)
+
+    threads = [threading.Thread(target=play) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert codes.count(200) == 1, f"more than one move was accepted: {codes}"
+    assert set(codes) <= {200, 409}, f"an unexpected status came back: {codes}"
+    assert client.get(f"/api/games/{game_id}").json()["game"]["moves"] == [3]
+
+
 # --------------------------------------------------------------------------
 # Undo, when the bot opened
 # --------------------------------------------------------------------------
@@ -731,6 +764,48 @@ def test_a_rematch_of_the_whole_finished_game_is_refused(client):
     response = client.post(
         f"/api/history/{archived['id']}/rematch",
         json={"ply": len(archived["moves"])},
+    )
+    assert response.status_code == 409
+
+
+def test_a_refused_rematch_leaves_no_game_behind(client):
+    """A 409 must not cost a slot in the store.
+
+    The store is capacity-bounded and evicts the oldest game to make room, so a
+    rejected rematch that still created a game would eventually throw away a
+    game somebody is playing to make room for one nobody can play.
+    """
+    archived = finished_game(client)["game"]
+    live = new_game(client)["game"]["id"]
+
+    for _ in range(MAX_GAMES + 1):
+        response = client.post(
+            f"/api/history/{archived['id']}/rematch",
+            json={"ply": len(archived["moves"])},
+        )
+        assert response.status_code == 409
+
+    assert client.get(f"/api/games/{live}").status_code == 200, (
+        "refused rematches evicted a live game"
+    )
+
+
+def test_a_drawn_game_is_refused_as_a_rematch_position_too(client):
+    """A full board is as finished as a won one, and was not being caught."""
+    drawn = [
+        0, 1, 0, 1, 0, 1,
+        1, 0, 1, 0, 1, 0,
+        2, 3, 2, 3, 2, 3,
+        3, 2, 3, 2, 3, 2,
+        4, 5, 4, 5, 4, 5,
+        5, 4, 5, 4, 5, 4,
+        6, 6, 6, 6, 6, 6,
+    ]
+    body = game_from(client, drawn)["game"]
+    assert body["status"] == "draw", "the fixture stopped being a drawn game"
+
+    response = client.post(
+        f"/api/history/{body['id']}/rematch", json={"ply": len(drawn)}
     )
     assert response.status_code == 409
 

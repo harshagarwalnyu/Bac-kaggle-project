@@ -21,6 +21,7 @@ on screen -- the analysis is attached to the position it describes.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -98,6 +99,13 @@ class Game:
     skill: int = 5
     bot_player: int = BOT
     created: float = field(default_factory=time.time)
+    # Held across "is this legal?" *and* the append that acts on the answer.
+    # FastAPI runs synchronous handlers in a threadpool, so two requests for
+    # the same game genuinely run at the same time: without this, both can
+    # pass the turn check on the same position and both append, which plays
+    # two plies for one side. A double-click on a column is enough to do it.
+    # One lock per game, so unrelated games never wait on each other.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @property
     def position(self) -> Position:
@@ -110,13 +118,18 @@ class Store:
     def __init__(self, capacity: int = MAX_GAMES) -> None:
         self._games: dict[str, Game] = {}
         self._capacity = capacity
+        # Guards the eviction loop, which is a read-then-delete: two concurrent
+        # creates can otherwise pick the same oldest game and the second delete
+        # raises KeyError, failing a request over pure bookkeeping.
+        self._lock = threading.Lock()
 
     def create(self, skill: int, bot_player: int) -> Game:
-        while len(self._games) >= self._capacity:
-            oldest = min(self._games.values(), key=lambda g: g.created)
-            del self._games[oldest.id]
         game = Game(id=uuid.uuid4().hex[:12], skill=skill, bot_player=bot_player)
-        self._games[game.id] = game
+        with self._lock:
+            while len(self._games) >= self._capacity:
+                oldest = min(self._games.values(), key=lambda g: g.created)
+                del self._games[oldest.id]
+            self._games[game.id] = game
         return game
 
     def get(self, game_id: str) -> Game:
@@ -426,54 +439,69 @@ def get_game(game_id: str) -> dict:
 @app.post("/api/games/{game_id}/moves")
 def play_move(game_id: str, request: MoveRequest) -> dict:
     game = app.state.store.get(game_id)
-    pos = game.position
 
-    if pos.has_won() or pos.is_draw():
-        raise HTTPException(status_code=409, detail="the game is already over")
-    if pos.current_player() == game.bot_player:
-        # Without this, a client can post twice in a row and play both sides:
-        # the handler alternates players implicitly from the move count, so the
-        # second move is silently accepted as the bot's. That is not a
-        # hypothetical -- a double-click on a column does it.
-        raise HTTPException(status_code=409, detail="it is not your turn")
-    if not pos.can_play(request.column):
-        raise HTTPException(status_code=409, detail=f"column {request.column} is full")
+    # The whole check-and-append is one critical section. Validating outside
+    # the lock would answer a question about a position that another thread is
+    # free to change before the append lands.
+    with game.lock:
+        pos = game.position
 
-    game.moves.append(request.column)
-    return _respond(game)
+        if pos.has_won() or pos.is_draw():
+            raise HTTPException(status_code=409, detail="the game is already over")
+        if pos.current_player() == game.bot_player:
+            # Without this, a client can post twice in a row and play both
+            # sides: the handler alternates players implicitly from the move
+            # count, so the second move is silently accepted as the bot's. That
+            # is not a hypothetical -- a double-click on a column does it.
+            raise HTTPException(status_code=409, detail="it is not your turn")
+        if not pos.can_play(request.column):
+            raise HTTPException(
+                status_code=409, detail=f"column {request.column} is full"
+            )
+
+        game.moves.append(request.column)
+        return _respond(game)
 
 
 @app.post("/api/games/{game_id}/bot-move")
 def bot_move(game_id: str, request: BotMoveRequest) -> dict:
     game = app.state.store.get(game_id)
-    pos = game.position
 
-    if pos.has_won() or pos.is_draw():
-        raise HTTPException(status_code=409, detail="the game is already over")
-    if pos.current_player() != game.bot_player:
-        # The mirror of the check in ``play_move``. A bot-move request that
-        # arrives on the human's turn used to be honoured, which let a retry or
-        # a stray click hand the bot two plies in a row.
-        raise HTTPException(status_code=409, detail="it is not the bot's turn")
+    # Held across the search too, not just the checks. The search is the slow
+    # part and therefore the widest window in which a human move could land and
+    # invalidate the position the bot is thinking about; releasing the lock for
+    # it would mean the bot answers a question about a board that no longer
+    # exists. Only this one game waits -- the lock is per game.
+    with game.lock:
+        pos = game.position
 
-    if request.skill is not None:
-        game.skill = request.skill
+        if pos.has_won() or pos.is_draw():
+            raise HTTPException(status_code=409, detail="the game is already over")
+        if pos.current_player() != game.bot_player:
+            # The mirror of the check in ``play_move``. A bot-move request that
+            # arrives on the human's turn used to be honoured, which let a retry
+            # or a stray click hand the bot two plies in a row.
+            raise HTTPException(status_code=409, detail="it is not the bot's turn")
 
-    # Analysed once and reused: ``choose_move`` runs its own search, so asking
-    # it for a move and then separately analysing the same position would pay
-    # for the search twice and could -- if anything were nondeterministic --
-    # report an opinion that did not match the move played.
-    analysis = _engine_for(game.skill).analyse(pos)
-    column = _pick(analysis, game.skill)
-    if column < 0:
-        raise HTTPException(status_code=409, detail="no legal move")
+        if request.skill is not None:
+            game.skill = request.skill
 
-    played_analysis = describe_analysis(
-        analysis, pos, app.state.evaluator or _NULL_EVALUATOR
-    )
-    game.moves.append(column)
+        # Analysed once and reused: ``choose_move`` runs its own search, so
+        # asking it for a move and then separately analysing the same position
+        # would pay for the search twice and could -- if anything were
+        # nondeterministic -- report an opinion that did not match the move
+        # played.
+        analysis = _engine_for(game.skill).analyse(pos)
+        column = _pick(analysis, game.skill)
+        if column < 0:
+            raise HTTPException(status_code=409, detail="no legal move")
 
-    return _respond(game, played=column, played_analysis=played_analysis)
+        played_analysis = describe_analysis(
+            analysis, pos, app.state.evaluator or _NULL_EVALUATOR
+        )
+        game.moves.append(column)
+
+        return _respond(game, played=column, played_analysis=played_analysis)
 
 
 def _pick(analysis: Analysis, skill: int) -> int:
@@ -532,12 +560,15 @@ def undo(game_id: str) -> dict:
     game = app.state.store.get(game_id)
     human = 3 - game.bot_player
 
-    if game.moves:
-        game.moves.pop()
-    while game.moves and game.position.current_player() != human:
-        game.moves.pop()
+    # Same critical section as the move handlers: an undo racing a move would
+    # otherwise pop a ply that the other thread is still deciding about.
+    with game.lock:
+        if game.moves:
+            game.moves.pop()
+        while game.moves and game.position.current_player() != human:
+            game.moves.pop()
 
-    return _respond(game)
+        return _respond(game)
 
 
 # --------------------------------------------------------------------------
@@ -619,13 +650,20 @@ def rematch(record_id: str, request: RematchRequest) -> dict:
     default_ply = max(0, len(record.moves) - 1)
     ply = default_ply if request.ply is None else min(request.ply, len(record.moves))
 
-    game = app.state.store.create(skill=record.skill, bot_player=record.bot_player)
-    game.moves.extend(record.moves[:ply])
-
-    if game.position.has_won():
-        # Only reachable when the caller asked for the full move list of a game
-        # that ended in a win. Refuse rather than hand back a dead game.
+    replayed = record.moves[:ply]
+    # Checked *before* anything is created, exactly as ``new_game`` does it. A
+    # rejected rematch that still left a game in the store would count against
+    # the store's capacity and could evict a live game to make room for one
+    # nobody can play.
+    resumed = Position.from_moves(replayed)
+    if resumed.has_won() or resumed.is_draw():
+        # Reachable when the caller asks for the full move list of a finished
+        # game -- a win or a full board alike. Refuse rather than hand back a
+        # dead game, which is the one position a rematch cannot start from.
         raise HTTPException(status_code=409, detail="that ply is already a finished game")
+
+    game = app.state.store.create(skill=record.skill, bot_player=record.bot_player)
+    game.moves.extend(replayed)
 
     return _respond(game, replayed_from=record_id, replayed_plies=ply)
 
