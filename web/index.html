@@ -18,16 +18,33 @@
 </header>
 
 <main>
+  <!-- ------------------------------------------------------------ board -->
   <section class="board-side">
     <div id="status" class="status">Loading&hellip;</div>
 
-    <div id="board" class="board" aria-label="Connect 4 board"></div>
+    <div class="board-row">
+      <!-- Lichess puts one vertical bar beside the board and nothing else.
+           It is the only number you need at a glance, so it gets the space. -->
+      <div class="evalbar" id="evalbar" title="Evaluation, from your side">
+        <div class="evalbar-fill" id="evalbar-fill"></div>
+        <span class="evalbar-text" id="evalbar-text">&mdash;</span>
+      </div>
+
+      <div id="board" class="board" aria-label="Connect 4 board"></div>
+    </div>
 
     <div class="controls">
       <button id="new-game" class="primary">New game</button>
       <button id="undo">Undo</button>
+      <button id="play-best" class="assist" hidden>Play best</button>
+    </div>
+
+    <div class="controls">
       <label class="toggle">
         <input type="checkbox" id="bot-first"> Bot moves first
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="assist"> Assist me &mdash; mark my best move
       </label>
     </div>
 
@@ -35,36 +52,77 @@
       <label for="skill" class="skill-label">
         Difficulty <output id="skill-value">5 &mdash; full strength</output>
       </label>
-      <input type="range" id="skill" min="0" max="5" step="1" value="5">
+      <input type="range" id="skill" min="0" max="6" step="1" value="5">
+    </div>
+
+    <!-- Shown only in solver mode. The claim it makes is strong enough that it
+         must also say what it is *not*. -->
+    <div id="solver-banner" class="banner" hidden>
+      <b>Solver mode &mdash; this is not the BAC model.</b>
+      The dataset network is switched out of the driving seat entirely; what plays
+      you here is pure alpha-beta search with a long clock and a transposition table
+      that carries over between moves. Connect 4 is a solved game (first player wins
+      by move 41), and from the midgame on this search reaches that truth exactly &mdash;
+      the <span class="pill proof">proven</span> badge lights up only when it really did.
+      Just for fun. Try beating it.
     </div>
 
     <p class="footnote">
-      Difficulty is the <i>n</i>-th best true move, never random noise &mdash; even at 0 the
-      bot always takes a win on the board and never walks into a mate in two.
+      <b>The numbered outlines are a prediction, not pieces.</b> They are the line the
+      solver expects if both sides play its best moves: <span class="ghost-key p1">1</span>
+      is the next move, <span class="ghost-key p2">2</span> the reply, and so on. Yellow
+      outlines are yours, red are the bot's. Nothing is played until you click.
+    </p>
+
+    <p class="footnote">
+      Difficulty 0&ndash;5 is the <i>n</i>-th best true move, never random noise &mdash; even at
+      0 the bot always takes a win on the board and never walks into a mate in two.
+      6 is solver mode.
     </p>
   </section>
 
+  <!-- ------------------------------------------------------------ panel -->
   <section class="panel">
-    <div class="panel-head">
-      <h2>Per-column verdicts</h2>
+    <nav class="tabs" id="tabs">
+      <button class="tab is-active" data-tab="analysis">Analysis</button>
+      <button class="tab" data-tab="moves">Moves</button>
+      <button class="tab" data-tab="history">History</button>
+    </nav>
+
+    <!-- Analysis ------------------------------------------------------- -->
+    <div class="tab-body" data-body="analysis">
       <div id="stats" class="stats"></div>
+
+      <div class="legend">
+        <span><i class="swatch engine"></i>solver (search)</span>
+        <span><i class="swatch network"></i>network (no search)</span>
+        <span><i class="swatch proof"></i>proven</span>
+      </div>
+
+      <div id="lines" class="lines"></div>
+
+      <div id="disagreement" class="disagreement"></div>
     </div>
 
-    <div class="legend">
-      <span><i class="swatch engine"></i>solver (search)</span>
-      <span><i class="swatch network"></i>network (no search)</span>
-      <span><i class="swatch proof"></i>proven</span>
+    <!-- Move list ------------------------------------------------------ -->
+    <div class="tab-body" data-body="moves" hidden>
+      <table class="movelist"><tbody id="movelist"></tbody></table>
+      <p id="movelist-empty" class="footnote">No moves yet.</p>
     </div>
 
-    <div id="columns" class="columns"></div>
-
-    <div class="pv">
-      <h3>Principal variation</h3>
-      <p id="pv-line" class="pv-line">&mdash;</p>
-      <p class="footnote">The line the solver expects. Ghost pieces on the board show it.</p>
+    <!-- History -------------------------------------------------------- -->
+    <div class="tab-body" data-body="history" hidden>
+      <div class="history-head">
+        <div id="record" class="record"></div>
+        <button id="clear-history" class="danger">Clear</button>
+      </div>
+      <div id="history" class="history"></div>
+      <p class="footnote">
+        Finished games are appended to <code>data/games.jsonl</code>, one JSON object
+        per line, storing the move list rather than a board &mdash; so any past game can
+        be replayed and re-analysed by a stronger search than the one that played it.
+      </p>
     </div>
-
-    <div id="disagreement" class="disagreement"></div>
   </section>
 </main>
 

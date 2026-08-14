@@ -1,5 +1,11 @@
 /* Deliberately dependency-free: no framework, no build step, no CDN.
-   `uv run python -m connect4.api` is the whole install. */
+   `uv run python -m connect4.api` is the whole install.
+
+   The layout borrows its shape from lichess' analysis board, because that page
+   solved this exact problem well: one evaluation bar beside the board carries
+   the headline number, the engine's candidate lines sit in a dense list beside
+   it, and everything else (moves, history) hides behind a tab rather than
+   competing for attention. The colours and the second, orange brain are ours. */
 
 :root {
   --bg: #0e1116;
@@ -14,7 +20,9 @@
   --loss: #f85149;
   --player: #f2c14e;
   --bot: #e0525f;
+  --assist: #56d364;
   --radius: 10px;
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -40,7 +48,7 @@ main {
   max-width: 1180px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(320px, 460px) 1fr;
+  grid-template-columns: minmax(320px, 480px) 1fr;
   gap: 26px;
   align-items: start;
 }
@@ -60,7 +68,49 @@ main {
 .status.win { color: var(--proof); }
 .status.lose { color: var(--loss); }
 
+.board-row { display: flex; gap: 12px; align-items: stretch; }
+
+/* The evaluation bar. Yours grows from the bottom, the bot's from the top --
+   the same convention as a chess eval bar, and it means "the bar is coming
+   towards me" reads as "I am winning" without a legend. */
+.evalbar {
+  position: relative;
+  width: 20px;
+  flex: none;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bot);
+  border: 1px solid var(--line);
+}
+.evalbar-fill {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 50%;
+  background: var(--player);
+  transition: height 260ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Green when the number is a proof rather than an opinion: the bar changes
+   meaning at that point, so it should change appearance too. */
+.evalbar.proof .evalbar-fill { background: var(--proof); }
+.evalbar.proof-loss .evalbar-fill { background: var(--player); }
+.evalbar.proof-loss { background: var(--loss); }
+
+.evalbar-text {
+  position: absolute;
+  left: 0; right: 0; bottom: 4px;
+  text-align: center;
+  font: 700 9px/1 var(--mono);
+  color: #0e1116;
+  letter-spacing: -0.03em;
+  mix-blend-mode: normal;
+}
+
+/* The board is seven *columns*, not forty-two cells in a grid. That is what
+   lets `.column:hover` light the whole column in CSS alone -- doing it in JS
+   meant rebuilding the board on every mousemove, which re-ran the drop
+   animation on every disc and flickered the whole board. */
 .board {
+  flex: 1;
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 8px;
@@ -70,23 +120,36 @@ main {
   border-radius: 14px;
 }
 
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.column.full, .column.over { cursor: not-allowed; }
+
 .cell {
   position: relative;
   aspect-ratio: 1;
   border-radius: 50%;
   background: #0c1017;
   box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6);
-  cursor: pointer;
   transition: background 120ms ease;
 }
-.cell[data-full="1"] { cursor: not-allowed; }
 
-.disc {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  animation: drop 260ms cubic-bezier(0.34, 1.2, 0.64, 1);
-}
+.column:not(.full):not(.over):hover .cell { background: #16202c; }
+
+/* Assist marks the column, not the cell, so it is legible from anywhere on
+   the board -- the same reasoning as hover. */
+.column.recommended { box-shadow: inset 0 0 0 2px var(--assist); }
+.column.recommended .cell.landing { box-shadow: inset 0 0 0 3px var(--assist); }
+
+.disc { position: absolute; inset: 0; border-radius: 50%; }
+
+/* Only the stone that was just played animates. Animating every disc on every
+   render makes the board jump each time anything changes. */
+.disc.last { animation: drop 260ms cubic-bezier(0.34, 1.2, 0.64, 1); }
 .disc.p1 { background: radial-gradient(circle at 34% 30%, #ffe08a, var(--player)); }
 .disc.p2 { background: radial-gradient(circle at 34% 30%, #ff8f97, var(--bot)); }
 
@@ -110,8 +173,6 @@ main {
 .ghost.p1 { border-color: var(--player); color: var(--player); }
 .ghost.p2 { border-color: var(--bot); color: var(--bot); }
 
-.cell.hint { background: #16202c; }
-
 @keyframes drop {
   from { transform: translateY(-320%); }
   to { transform: translateY(0); }
@@ -122,7 +183,7 @@ main {
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 button {
@@ -137,12 +198,53 @@ button {
 button:hover:not(:disabled) { border-color: var(--engine); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.primary { background: #1f6feb; border-color: #1f6feb; }
+button.assist { border-color: var(--assist); color: var(--assist); }
+button.danger { border-color: var(--loss); color: var(--loss); padding: 5px 10px; font-size: 13px; }
 
 .toggle, .skill-label { color: var(--ink-dim); font-size: 14px; }
 .skill-label output { color: var(--ink); }
 input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--engine); }
+input[type="range"].solver { accent-color: var(--proof); }
 
 .footnote { color: var(--ink-dim); font-size: 12.5px; margin: 10px 0 0; }
+.footnote code { color: var(--ink); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+
+/* The solver-mode disclosure. Loud on purpose: it is claiming to be a
+   different program from the one the project is about. */
+.banner {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--proof);
+  background: rgba(63, 185, 80, 0.08);
+  color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.banner b { color: var(--proof); }
+
+.pill {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 20px;
+  font: 700 11px/1.6 var(--mono);
+}
+.pill.proof { background: var(--proof); color: #0e1116; }
+
+/* A miniature of the on-board ghost, so the explanation shows the thing it is
+   explaining instead of describing it. */
+.ghost-key {
+  display: inline-grid;
+  place-items: center;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  border: 2px dashed currentColor;
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: -3px;
+}
+.ghost-key.p1 { color: var(--player); }
+.ghost-key.p2 { color: var(--bot); }
 
 /* ---------------------------------------------------------------- panel */
 
@@ -150,21 +252,37 @@ input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--engine); }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 18px 20px 20px;
+  padding: 0 0 18px;
+  overflow: hidden;
 }
 
-.panel-head {
+.tabs {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 16px;
-  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+  background: #12171f;
 }
-.panel-head h2 { margin: 0; font-size: 17px; }
+.tab {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ink-dim);
+  padding: 11px 0;
+  font-size: 14px;
+}
+.tab:hover:not(.is-active) { color: var(--ink); }
+.tab.is-active {
+  color: var(--ink);
+  border-bottom-color: var(--engine);
+  background: var(--panel);
+}
+
+.tab-body { padding: 16px 20px 0; }
 
 .stats {
   color: var(--ink-dim);
-  font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+  font: 12.5px/1.5 var(--mono);
 }
 .stats b { color: var(--ink); font-weight: 600; }
 
@@ -172,7 +290,7 @@ input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--engine); }
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
-  margin: 12px 0 16px;
+  margin: 12px 0 14px;
   color: var(--ink-dim);
   font-size: 12.5px;
 }
@@ -186,70 +304,81 @@ input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--engine); }
 .swatch.network { background: var(--network); }
 .swatch.proof { background: var(--proof); }
 
-.columns { display: flex; flex-direction: column; gap: 6px; }
+/* Candidate lines, best first -- the lichess engine-lines list. Each row is
+   one legal column: its evaluation, the variation that follows it, and the
+   network's independent opinion underneath. */
+.lines { display: flex; flex-direction: column; }
 
-.row {
+.line {
   display: grid;
-  grid-template-columns: 34px 1fr 92px;
+  grid-template-columns: 60px 1fr;
   gap: 12px;
-  align-items: center;
-  padding: 7px 8px;
-  border-radius: var(--radius);
-  background: var(--panel-2);
-  border: 1px solid transparent;
+  align-items: start;
+  padding: 8px 8px;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
 }
-.row.best { border-color: var(--engine); }
-.row.dead { opacity: 0.45; }
+.lines .line:first-child { border-top: 0; }
+.line:hover { background: var(--panel-2); }
+.line.best { background: rgba(88, 166, 255, 0.07); }
+.line.dead .line-pv { opacity: 0.4; }
 
-.row .col-id {
-  font: 600 13px ui-monospace, Consolas, monospace;
-  color: var(--ink-dim);
+.line-eval {
+  font: 700 13px/1.35 var(--mono);
   text-align: center;
+  padding: 3px 0;
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--engine);
 }
-.row.best .col-id { color: var(--engine); }
+.line-eval.proof { background: var(--proof); color: #0e1116; }
+.line-eval.proof-loss { background: var(--loss); color: #0e1116; }
 
-.bars { display: flex; flex-direction: column; gap: 4px; }
+.line-main { min-width: 0; }
+.line-pv {
+  font: 12.5px/1.5 var(--mono);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.line-pv .drop { color: var(--ink-dim); }
+.line-pv .drop.head { color: var(--engine); font-weight: 700; }
 
-/* Bars are centred: left of the midline is bad for the mover, right is good.
-   A signed quantity drawn as an unsigned bar would be a lie. */
-.bar {
+/* The network's row: same width, deliberately quieter, so the eye reads the
+   search first and the disagreement second. */
+.line-net {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  font: 11.5px/1 var(--mono);
+  color: var(--network);
+}
+.netbar {
   position: relative;
-  height: 9px;
+  flex: 1;
+  height: 5px;
   background: #0f1520;
-  border-radius: 5px;
+  border-radius: 3px;
   overflow: hidden;
 }
-.bar::before {
+.netbar::before {
   content: "";
   position: absolute;
   left: 50%; top: 0; bottom: 0;
   width: 1px;
   background: var(--line);
 }
-.fill {
+/* Centred fill: left of the midline is bad for the mover, right is good. A
+   signed quantity drawn as an unsigned bar would be a lie. */
+.netbar-fill {
   position: absolute;
   top: 0; bottom: 0;
-  border-radius: 5px;
+  border-radius: 3px;
+  background: var(--network);
   transition: left 220ms ease, width 220ms ease;
 }
-.fill.engine { background: var(--engine); }
-.fill.engine.proof { background: var(--proof); }
-.fill.engine.proof-loss { background: var(--loss); }
-.fill.network { background: var(--network); }
-
-.verdict {
-  text-align: right;
-  font: 12.5px ui-monospace, Consolas, monospace;
-  color: var(--ink-dim);
-}
-.verdict .engine-v { color: var(--engine); display: block; }
-.verdict .engine-v.proof { color: var(--proof); }
-.verdict .engine-v.proof-loss { color: var(--loss); }
-.verdict .network-v { color: var(--network); display: block; font-size: 11.5px; }
-
-.pv { margin-top: 20px; }
-.pv h3 { margin: 0 0 6px; font-size: 14px; }
-.pv-line { margin: 0; font: 13px ui-monospace, Consolas, monospace; color: var(--ink); }
 
 .disagreement {
   margin-top: 16px;
@@ -262,3 +391,69 @@ input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--engine); }
   min-height: 20px;
 }
 .disagreement b { color: var(--network); }
+
+/* ------------------------------------------------------------ move list */
+
+.movelist {
+  width: 100%;
+  border-collapse: collapse;
+  font: 13px var(--mono);
+}
+.movelist td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.movelist .num { color: var(--ink-dim); width: 34px; }
+.movelist .m1 { color: var(--player); }
+.movelist .m2 { color: var(--bot); }
+.movelist tr:last-child td { border-bottom: 0; }
+.movelist tr.current td { background: var(--panel-2); }
+
+/* -------------------------------------------------------------- history */
+
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.record { font: 13px var(--mono); color: var(--ink-dim); }
+.record b { color: var(--ink); }
+.record .w { color: var(--proof); }
+.record .l { color: var(--loss); }
+
+.history { display: flex; flex-direction: column; gap: 6px; }
+
+.hgame {
+  display: grid;
+  grid-template-columns: 74px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  border-left-width: 3px;
+  font-size: 13px;
+}
+.hgame.won { border-left-color: var(--proof); }
+.hgame.lost { border-left-color: var(--loss); }
+.hgame.drew { border-left-color: var(--ink-dim); }
+
+.hgame .outcome { font-weight: 600; }
+.hgame.won .outcome { color: var(--proof); }
+.hgame.lost .outcome { color: var(--loss); }
+.hgame.drew .outcome { color: var(--ink-dim); }
+
+.hgame .meta { color: var(--ink-dim); font: 12px var(--mono); }
+.hgame .when { color: var(--ink-dim); font-size: 12px; white-space: nowrap; }
+.hgame .badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--proof);
+  color: #0e1116;
+  font: 700 10px/1.5 var(--mono);
+}

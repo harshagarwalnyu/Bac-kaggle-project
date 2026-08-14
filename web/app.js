@@ -12,32 +12,46 @@
 
 const COLUMNS = 7;
 const ROWS = 6;
+const SOLVER_SKILL = 6;
 
 const state = {
   game: null,          // server's description of the position
   analysis: null,      // both brains, about the position now on screen
   busy: false,         // a request is in flight; input is locked
   message: "",
-  hoverColumn: null,
+  tab: "analysis",
+  history: { summary: null, games: [] },
 };
 
 const el = {
   board: document.getElementById("board"),
   status: document.getElementById("status"),
-  columns: document.getElementById("columns"),
+  evalbar: document.getElementById("evalbar"),
+  evalbarFill: document.getElementById("evalbar-fill"),
+  evalbarText: document.getElementById("evalbar-text"),
   stats: document.getElementById("stats"),
-  pv: document.getElementById("pv-line"),
+  lines: document.getElementById("lines"),
   disagreement: document.getElementById("disagreement"),
+  movelist: document.getElementById("movelist"),
+  movelistEmpty: document.getElementById("movelist-empty"),
+  history: document.getElementById("history"),
+  record: document.getElementById("record"),
+  clearHistory: document.getElementById("clear-history"),
   newGame: document.getElementById("new-game"),
   undo: document.getElementById("undo"),
+  playBest: document.getElementById("play-best"),
   botFirst: document.getElementById("bot-first"),
+  assist: document.getElementById("assist"),
   skill: document.getElementById("skill"),
   skillValue: document.getElementById("skill-value"),
+  solverBanner: document.getElementById("solver-banner"),
+  tabs: document.getElementById("tabs"),
 };
 
 const SKILL_NAMES = [
   "0 — sixth best", "1 — fifth best", "2 — fourth best",
   "3 — third best", "4 — second best", "5 — full strength",
+  "6 — SOLVER (not the ML model)",
 ];
 
 /* ----------------------------------------------------------------- network */
@@ -85,12 +99,19 @@ async function playColumn(column) {
   });
 
   if (state.game.status === "playing") await botMove();
+  else await loadHistory();
+}
+
+/** The assist toggle's button: play whatever the search says is best for me. */
+function playRecommended() {
+  const column = recommendedColumn();
+  if (column !== null) playColumn(column);
 }
 
 async function botMove() {
   if (!state.game || state.game.status !== "playing") return;
 
-  state.message = "Thinking…";
+  state.message = solverMode() ? "Solving…" : "Thinking…";
   render();
 
   await withBusy(async () => {
@@ -99,6 +120,7 @@ async function botMove() {
     });
     absorb(data);
   });
+  if (state.game.status !== "playing") await loadHistory();
 }
 
 async function undo() {
@@ -106,6 +128,21 @@ async function undo() {
   await withBusy(async () => {
     absorb(await post(`/api/games/${state.game.id}/undo`));
   });
+}
+
+async function loadHistory() {
+  try {
+    state.history = await api("/api/history?limit=25");
+  } catch {
+    // History is a nicety. Failing to load it must not break the game.
+    state.history = { summary: null, games: [] };
+  }
+  renderHistory();
+}
+
+async function clearHistory() {
+  await api("/api/history", { method: "DELETE" });
+  await loadHistory();
 }
 
 /** Run `work` with input locked, and turn any failure into a visible message. */
@@ -130,16 +167,43 @@ function absorb(data) {
 
 /** The bot owns one colour; the human owns the other. */
 const humanPlayer = () => (state.game.bot_player === 1 ? 2 : 1);
+const solverMode = () => Number(el.skill.value) >= SOLVER_SKILL;
+const myTurn = () =>
+  state.game && state.game.status === "playing" && state.game.turn === humanPlayer();
+
+/**
+ * The column the search would play for me, or null.
+ *
+ * `analysis` always describes the position currently on the board, from the
+ * point of view of whoever is to move. When that is me, the engine's best move
+ * *is* my best move -- no transformation needed, and none should be invented.
+ */
+function recommendedColumn() {
+  if (!myTurn() || !state.analysis) return null;
+  const best = state.analysis.best_move;
+  return state.game.legal_moves.includes(best) ? best : null;
+}
 
 /* ----------------------------------------------------------------- drawing */
 
 function render() {
   if (!state.game) return;
   renderStatus();
+  renderEvalBar();
   renderBoard();
-  renderPanel();
+  renderLines();
+  renderMoveList();
+
+  const assistColumn = el.assist.checked ? recommendedColumn() : null;
+  el.playBest.hidden = assistColumn === null;
+  el.playBest.disabled = state.busy;
+  el.playBest.textContent =
+    assistColumn === null ? "Play best" : `Play best — column ${assistColumn}`;
+
   el.undo.disabled = state.busy || state.game.moves.length === 0;
   el.newGame.disabled = state.busy;
+  el.solverBanner.hidden = !solverMode();
+  el.skill.classList.toggle("solver", solverMode());
 }
 
 function renderStatus() {
@@ -148,7 +212,7 @@ function renderStatus() {
 
   if (state.message) {
     text = state.message;
-    cls = state.message === "Thinking…" ? "thinking" : "";
+    cls = /…$/.test(state.message) ? "thinking" : "";
   } else if (game.status === "won") {
     const humanWon = game.winner === humanPlayer();
     text = humanWon ? "You win." : "The bot wins.";
@@ -165,24 +229,68 @@ function renderStatus() {
   el.status.className = `status ${cls}`;
 }
 
+/**
+ * The headline number, always stated from the human's side.
+ *
+ * `analysis` speaks for whoever is to move, so when the bot is to move the
+ * sign has to flip. Getting that backwards would make the bar say the opposite
+ * of the truth exactly half the time, which is worse than having no bar.
+ */
+function renderEvalBar() {
+  const best = state.analysis?.columns
+    ? [...state.analysis.columns].sort((a, b) => b.engine.score - a.engine.score)[0]
+    : null;
+
+  if (!best) {
+    el.evalbar.className = "evalbar";
+    el.evalbarFill.style.height = "50%";
+    el.evalbarText.textContent = "—";
+    return;
+  }
+
+  const mine = state.game.turn === humanPlayer() ? 1 : -1;
+  const signed = engineWidth(best.engine) * mine;
+
+  el.evalbar.className =
+    "evalbar" + (best.engine.exact ? (signed > 0 ? " proof" : signed < 0 ? " proof-loss" : "") : "");
+  el.evalbarFill.style.height = `${(signed + 1) * 50}%`;
+
+  if (best.engine.exact && best.engine.mate_in) {
+    el.evalbarText.textContent = `#${best.engine.mate_in}`;
+  } else if (best.engine.exact) {
+    el.evalbarText.textContent = "=";
+  } else {
+    el.evalbarText.textContent = Math.abs(signed).toFixed(1);
+  }
+}
+
 function renderBoard() {
   const game = state.game;
   const ghosts = principalVariationCells();
   const lastCell = lastMoveCell();
+  const assistColumn = el.assist.checked ? recommendedColumn() : null;
+  const heights = columnHeights();
 
-  el.board.replaceChildren();
+  const board = document.createDocumentFragment();
 
-  for (let row = 0; row < ROWS; row++) {
-    for (let column = 0; column < COLUMNS; column++) {
+  for (let column = 0; column < COLUMNS; column++) {
+    const stack = document.createElement("div");
+    stack.className = "column";
+    stack.dataset.column = String(column);
+    // Two different reasons a column cannot be clicked, kept distinct so the
+    // stylesheet can say so: the column is full, or the game is over.
+    if (!game.legal_moves.includes(column)) stack.classList.add("full");
+    if (game.status !== "playing") stack.classList.add("over");
+    if (column === assistColumn) stack.classList.add("recommended");
+
+    const landingRow = ROWS - 1 - heights[column];
+
+    for (let row = 0; row < ROWS; row++) {
       const cell = document.createElement("div");
       cell.className = "cell";
-      cell.dataset.column = String(column);
+      if (column === assistColumn && row === landingRow) cell.classList.add("landing");
 
       const value = game.grid[row][column];
-      const playable = game.legal_moves.includes(column);
-      if (!playable) cell.dataset.full = "1";
-      if (playable && state.hoverColumn === column) cell.classList.add("hint");
-
       if (value !== 0) {
         const disc = document.createElement("div");
         disc.className = `disc p${value}`;
@@ -200,9 +308,24 @@ function renderBoard() {
         }
       }
 
-      el.board.appendChild(cell);
+      stack.appendChild(cell);
+    }
+    board.appendChild(stack);
+  }
+
+  // One swap rather than 42 appends, so the browser lays the board out once.
+  el.board.replaceChildren(board);
+}
+
+/** How many stones are already in each column. */
+function columnHeights() {
+  const heights = new Array(COLUMNS).fill(0);
+  for (let column = 0; column < COLUMNS; column++) {
+    for (let row = 0; row < ROWS; row++) {
+      if (state.game.grid[row][column] !== 0) heights[column]++;
     }
   }
+  return heights;
 }
 
 /** Where the last stone landed, in display coordinates. */
@@ -229,13 +352,7 @@ function principalVariationCells() {
   const pv = state.analysis?.principal_variation ?? [];
   if (!pv.length) return cells;
 
-  const heights = new Array(COLUMNS).fill(0);
-  for (let column = 0; column < COLUMNS; column++) {
-    for (let row = 0; row < ROWS; row++) {
-      if (state.game.grid[row][column] !== 0) heights[column]++;
-    }
-  }
-
+  const heights = columnHeights();
   let player = state.game.turn;
   pv.forEach((column, index) => {
     const height = heights[column];
@@ -247,67 +364,97 @@ function principalVariationCells() {
   return cells;
 }
 
-function renderPanel() {
+/* ------------------------------------------------------------ engine lines */
+
+function renderLines() {
   const analysis = state.analysis;
-  el.columns.replaceChildren();
+  el.lines.replaceChildren();
 
   if (!analysis) {
     el.stats.textContent = "";
-    el.pv.textContent = "—";
     el.disagreement.textContent = "Game over — nothing left to search.";
     return;
   }
 
   const stats = analysis.stats;
+  const nps = stats.elapsed_ms > 0
+    ? Math.round(stats.nodes / (stats.elapsed_ms / 1000))
+    : 0;
   el.stats.innerHTML =
-    `depth <b>${stats.depth}</b> · nodes <b>${stats.nodes.toLocaleString()}</b> · ` +
-    `tt hits <b>${stats.table_hits.toLocaleString()}</b> · <b>${stats.elapsed_ms}</b> ms` +
-    (stats.exact ? ' · <b style="color:var(--proof)">solved</b>' : "");
+    `depth <b>${stats.depth}</b> · <b>${stats.nodes.toLocaleString()}</b> nodes · ` +
+    `<b>${(nps / 1000).toFixed(0)}</b> kn/s · tt <b>${stats.table_hits.toLocaleString()}</b> · ` +
+    `<b>${stats.elapsed_ms}</b> ms` +
+    (stats.exact ? ' · <span class="pill proof">proven</span>' : "");
 
-  // Columns arrive best-first from the engine. Showing them in board order
-  // instead lets you compare the panel against the board without hunting.
-  const byColumn = [...analysis.columns].sort((a, b) => a.column - b.column);
-  for (const entry of byColumn) el.columns.appendChild(columnRow(entry, analysis.best_move));
-
-  el.pv.textContent = analysis.principal_variation.length
-    ? analysis.principal_variation.map((c, i) => `${i + 1}. col ${c}`).join("   ")
-    : "—";
+  // Best first, like an engine-lines list: the ordering *is* the information.
+  // (The board itself is the place to look things up by column.)
+  const ranked = [...analysis.columns].sort((a, b) => b.engine.score - a.engine.score);
+  ranked.forEach((entry, index) => {
+    el.lines.appendChild(lineRow(entry, index === 0, analysis));
+  });
 
   el.disagreement.innerHTML = disagreementNote(analysis);
 }
 
-function columnRow(entry, bestMove) {
+function lineRow(entry, isBest, analysis) {
   const row = document.createElement("div");
-  row.className = "row";
-  if (entry.column === bestMove) row.classList.add("best");
+  row.className = "line";
+  row.dataset.column = String(entry.column);
+  if (isBest) row.classList.add("best");
 
-  const engineProof = entry.engine.exact;
-  const losing = engineProof && entry.engine.score < 0;
+  const proof = entry.engine.exact;
+  const losing = proof && entry.engine.score < 0;
   if (losing) row.classList.add("dead");
 
-  const id = document.createElement("div");
-  id.className = "col-id";
-  id.textContent = entry.column;
+  const evalBox = document.createElement("div");
+  evalBox.className = `line-eval ${proof ? (losing ? "proof-loss" : "proof") : ""}`.trim();
+  evalBox.textContent = shortEval(entry.engine);
 
-  const bars = document.createElement("div");
-  bars.className = "bars";
-  bars.appendChild(bar("engine", engineWidth(entry.engine),
-    engineProof ? (losing ? "proof-loss" : "proof") : ""));
-  bars.appendChild(bar("network", entry.network.preference, ""));
+  const main = document.createElement("div");
+  main.className = "line-main";
 
-  const verdict = document.createElement("div");
-  verdict.className = "verdict";
-  const engineText = document.createElement("span");
-  engineText.className = `engine-v ${engineProof ? (losing ? "proof-loss" : "proof") : ""}`;
-  engineText.textContent = entry.engine.label;
-  const networkText = document.createElement("span");
-  networkText.className = "network-v";
-  networkText.textContent = formatSigned(entry.network.preference);
-  verdict.append(engineText, networkText);
+  // Only the top line has a stored variation; the rest show their own move as
+  // the head of a line we did not search deeply. Inventing a continuation for
+  // them would be fabrication, so they simply show one move.
+  const pv = document.createElement("div");
+  pv.className = "line-pv";
+  const line = isBest && analysis.principal_variation.length
+    ? analysis.principal_variation
+    : [entry.column];
+  line.forEach((column, index) => {
+    const span = document.createElement("span");
+    span.className = index === 0 ? "drop head" : "drop";
+    span.textContent = `${index + 1}.c${column} `;
+    pv.appendChild(span);
+  });
 
-  row.append(id, bars, verdict);
+  const net = document.createElement("div");
+  net.className = "line-net";
+  const label = document.createElement("span");
+  label.textContent = "net";
+  const track = document.createElement("div");
+  track.className = "netbar";
+  const fill = document.createElement("div");
+  fill.className = "netbar-fill";
+  const magnitude = Math.abs(entry.network.preference) * 50;
+  fill.style.width = `${magnitude}%`;
+  fill.style.left = entry.network.preference >= 0 ? "50%" : `${50 - magnitude}%`;
+  track.appendChild(fill);
+  const value = document.createElement("span");
+  value.textContent = formatSigned(entry.network.preference);
+  net.append(label, track, value);
+
+  main.append(pv, net);
+  row.append(evalBox, main);
   row.title = networkTooltip(entry);
   return row;
+}
+
+/** Engine verdict, short enough for a 60px box. `#n` is a proven mate in n. */
+function shortEval(engine) {
+  if (!engine.exact) return formatSigned(engine.score);
+  if (!engine.mate_in || engine.score === 0) return "=";
+  return `${engine.score > 0 ? "#" : "-#"}${engine.mate_in}`;
 }
 
 /**
@@ -321,20 +468,6 @@ function columnRow(entry, bestMove) {
 function engineWidth(engine) {
   if (engine.exact) return engine.score > 0 ? 1 : engine.score < 0 ? -1 : 0;
   return Math.max(-1, Math.min(1, engine.score));
-}
-
-function bar(kind, value, extraClass) {
-  const track = document.createElement("div");
-  track.className = "bar";
-  const fill = document.createElement("div");
-  fill.className = `fill ${kind} ${extraClass}`.trim();
-
-  const magnitude = Math.abs(value) * 50;   // half the track is 100%
-  fill.style.width = `${magnitude}%`;
-  fill.style.left = value >= 0 ? "50%" : `${50 - magnitude}%`;
-
-  track.appendChild(fill);
-  return track;
 }
 
 const formatSigned = (value) => (value >= 0 ? "+" : "") + value.toFixed(2);
@@ -381,40 +514,138 @@ function disagreementNote(analysis) {
          `That is the gap between fitting 67k labelled positions and actually solving one.`;
 }
 
+/* -------------------------------------------------------------- move list */
+
+function renderMoveList() {
+  const moves = state.game.moves;
+  el.movelistEmpty.hidden = moves.length > 0;
+  el.movelist.replaceChildren();
+
+  // Paired per turn, the way a chess score sheet reads: one row is "player 1
+  // did this, player 2 answered that".
+  const rows = document.createDocumentFragment();
+  for (let i = 0; i < moves.length; i += 2) {
+    const tr = document.createElement("tr");
+    if (i + 2 >= moves.length) tr.className = "current";
+    tr.append(
+      cellText("num", `${i / 2 + 1}.`),
+      cellText("m1", `col ${moves[i]}`),
+      cellText("m2", moves[i + 1] === undefined ? "" : `col ${moves[i + 1]}`),
+    );
+    rows.appendChild(tr);
+  }
+  el.movelist.appendChild(rows);
+}
+
+function cellText(className, text) {
+  const td = document.createElement("td");
+  td.className = className;
+  td.textContent = text;
+  return td;
+}
+
+/* ---------------------------------------------------------------- history */
+
+function renderHistory() {
+  const { summary, games } = state.history;
+
+  el.record.innerHTML = summary && summary.games
+    ? `<b>${summary.games}</b> games · <span class="w">${summary.human_wins}W</span> ` +
+      `<span class="l">${summary.bot_wins}L</span> ${summary.draws}D`
+    : "No games finished yet.";
+
+  el.history.replaceChildren();
+  const list = document.createDocumentFragment();
+  for (const game of games) {
+    const row = document.createElement("div");
+    const kind = game.winner === 0 ? "drew" : game.outcome === "you won" ? "won" : "lost";
+    row.className = `hgame ${kind}`;
+
+    const outcome = document.createElement("div");
+    outcome.className = "outcome";
+    outcome.textContent = game.outcome;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${game.plies} plies · ${game.duration_s}s · skill ${game.skill}`;
+    if (game.solver) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "SOLVER";
+      meta.appendChild(badge);
+    }
+
+    const when = document.createElement("div");
+    when.className = "when";
+    when.textContent = relativeTime(game.ended);
+
+    // The move list is the record's whole point; hovering shows it.
+    row.title = `moves: ${game.moves.join(" ")}`;
+    row.append(outcome, meta, when);
+    list.appendChild(row);
+  }
+  el.history.appendChild(list);
+}
+
+function relativeTime(epochSeconds) {
+  const seconds = Math.max(0, Date.now() / 1000 - epochSeconds);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
 /* ---------------------------------------------------------------- wiring */
 
+// Column highlighting is `.column:hover` in the stylesheet. There is no hover
+// handler here on purpose: re-rendering on mousemove rebuilt every disc and
+// restarted its animation, which flickered the whole board.
 el.board.addEventListener("click", (event) => {
-  const cell = event.target.closest(".cell");
-  if (cell) playColumn(Number(cell.dataset.column));
+  const stack = event.target.closest(".column");
+  if (stack) playColumn(Number(stack.dataset.column));
 });
 
-el.board.addEventListener("mousemove", (event) => {
-  const cell = event.target.closest(".cell");
-  const column = cell ? Number(cell.dataset.column) : null;
-  if (column !== state.hoverColumn) {
-    state.hoverColumn = column;
-    renderBoard();
+// Clicking an engine line plays that column. It is the fastest way to explore
+// "what if I took the second-best move", and it costs one line of code.
+el.lines.addEventListener("click", (event) => {
+  const line = event.target.closest(".line");
+  if (line) playColumn(Number(line.dataset.column));
+});
+
+el.tabs.addEventListener("click", (event) => {
+  const tab = event.target.closest(".tab");
+  if (!tab) return;
+  state.tab = tab.dataset.tab;
+  for (const button of el.tabs.querySelectorAll(".tab")) {
+    button.classList.toggle("is-active", button.dataset.tab === state.tab);
   }
+  for (const body of document.querySelectorAll(".tab-body")) {
+    body.hidden = body.dataset.body !== state.tab;
+  }
+  if (state.tab === "history") loadHistory();
 });
 
-el.board.addEventListener("mouseleave", () => {
-  state.hoverColumn = null;
-  renderBoard();
-});
-
-// Keyboard play: 1-7 drop, u undo, n new game. Faster than the mouse once you
-// know the board, and it makes the app usable without one.
+// Keyboard play: 1-7 drop, u undo, n new game, Enter takes the recommendation.
+// Faster than the mouse once you know the board, and it makes the app usable
+// without one.
 document.addEventListener("keydown", (event) => {
+  if (event.target.matches("input, button")) return;
   if (event.key >= "1" && event.key <= "7") playColumn(Number(event.key) - 1);
   else if (event.key === "u") undo();
   else if (event.key === "n") newGame();
+  else if (event.key === "Enter" && el.assist.checked) playRecommended();
 });
 
 el.newGame.addEventListener("click", newGame);
 el.undo.addEventListener("click", undo);
+el.playBest.addEventListener("click", playRecommended);
+el.assist.addEventListener("change", render);
+el.clearHistory.addEventListener("click", clearHistory);
 el.skill.addEventListener("input", () => {
   el.skillValue.textContent = SKILL_NAMES[Number(el.skill.value)];
+  if (state.game) render();
 });
 
 el.skillValue.textContent = SKILL_NAMES[Number(el.skill.value)];
 newGame();
+loadHistory();
