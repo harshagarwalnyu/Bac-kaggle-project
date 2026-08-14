@@ -136,6 +136,16 @@ rather than swallowed. It is **durable only once the write succeeds**: a game
 whose write failed is gone after a restart. What the format buys is that its loss
 is confined to itself.
 
+Because a game *is* its move list, two things fall out for free:
+
+- `POST /api/games` takes an optional `moves` opening, so a position is
+  shareable and a saved game is resumable. Illegal sequences are rejected, not
+  clamped — a typo must not quietly produce a different position.
+- `POST /api/history/{id}/rematch` replays an archived game into a new one,
+  one ply short of the end by default: the position worth thinking about again
+  is the one before the mistake. Colours and difficulty are inherited, because
+  a rematch you win by quietly switching sides is not a rematch.
+
 ## Layout
 
 ```
@@ -149,7 +159,7 @@ src/connect4/
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          256 tests
+tests/          279 tests
 ```
 
 ### Configuration
@@ -201,7 +211,7 @@ entirely. Accuracy alone would have hidden that completely.
 
 ```bash
 uv sync
-uv run python -m pytest              # 256 tests
+uv run python -m pytest              # 279 tests
 uv run python -m scripts.train       # downloads the data, trains, prints baselines
 uv run python -m scripts.validate    # the three experiments above
 uv run python -m connect4.api        # play
