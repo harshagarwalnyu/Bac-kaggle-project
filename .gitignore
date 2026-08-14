@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Raw dataset archives are re-downloadable; keep the repo light.
+data/raw/
+*.Z
+*.zip
+
+# Trained weights are regenerable via scripts/train.py, but the final
+# small model IS committed so the app runs without retraining.
+models/*.tmp

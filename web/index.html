@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect 4 &mdash; glass-box bot</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Connect 4 <span class="sub">glass-box bot</span></h1>
+  <p class="tagline">
+    Two brains argue about every move. The <b class="engine-ink">solver</b> searches and
+    sometimes <i>proves</i>. The <b class="network-ink">dataset network</b> only has an
+    opinion. Watch where the opinion is wrong.
+  </p>
+</header>
+
+<main>
+  <section class="board-side">
+    <div id="status" class="status">Loading&hellip;</div>
+
+    <div id="board" class="board" aria-label="Connect 4 board"></div>
+
+    <div class="controls">
+      <button id="new-game" class="primary">New game</button>
+      <button id="undo">Undo</button>
+      <label class="toggle">
+        <input type="checkbox" id="bot-first"> Bot moves first
+      </label>
+    </div>
+
+    <div class="controls">
+      <label for="skill" class="skill-label">
+        Difficulty <output id="skill-value">5 &mdash; full strength</output>
+      </label>
+      <input type="range" id="skill" min="0" max="5" step="1" value="5">
+    </div>
+
+    <p class="footnote">
+      Difficulty is the <i>n</i>-th best true move, never random noise &mdash; even at 0 the
+      bot always takes a win on the board and never walks into a mate in two.
+    </p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Per-column verdicts</h2>
+      <div id="stats" class="stats"></div>
+    </div>
+
+    <div class="legend">
+      <span><i class="swatch engine"></i>solver (search)</span>
+      <span><i class="swatch network"></i>network (no search)</span>
+      <span><i class="swatch proof"></i>proven</span>
+    </div>
+
+    <div id="columns" class="columns"></div>
+
+    <div class="pv">
+      <h3>Principal variation</h3>
+      <p id="pv-line" class="pv-line">&mdash;</p>
+      <p class="footnote">The line the solver expects. Ghost pieces on the board show it.</p>
+    </div>
+
+    <div id="disagreement" class="disagreement"></div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

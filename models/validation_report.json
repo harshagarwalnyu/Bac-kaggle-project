@@ -1,0 +1,74 @@
+{
+  "config": {
+    "positions": 300,
+    "games": 14,
+    "depth": 7,
+    "time_limit": 8.0,
+    "seed": 0,
+    "quick": false
+  },
+  "throughput": {
+    "measurements": [
+      {
+        "evaluator": "heuristic",
+        "nodes": 4382,
+        "ms": 61.06010000803508,
+        "depth": 7
+      },
+      {
+        "evaluator": "network",
+        "nodes": 3823,
+        "ms": 94.25460000056773,
+        "depth": 7
+      }
+    ],
+    "network_slowdown": 1.5436365153048308
+  },
+  "verdict_agreement": [
+    {
+      "name": "network alone (no search)",
+      "three_class_accuracy": 0.84,
+      "decisive_accuracy": 0.922509225092251,
+      "n": 300,
+      "n_decisive": 271,
+      "seconds": 0.0064325999992433935,
+      "predicted_draw_rate": 0.023333333333333334
+    },
+    {
+      "name": "search + hand-written heuristic",
+      "three_class_accuracy": 0.67,
+      "decisive_accuracy": 0.7343173431734318,
+      "n": 300,
+      "n_decisive": 271,
+      "seconds": 32.8320195999986,
+      "predicted_draw_rate": 0.06666666666666667
+    },
+    {
+      "name": "search + network (the shipped bot)",
+      "three_class_accuracy": 0.71,
+      "decisive_accuracy": 0.7822878228782287,
+      "n": 300,
+      "n_decisive": 271,
+      "seconds": 88.4095229000086,
+      "predicted_draw_rate": 0.013333333333333334
+    }
+  ],
+  "head_to_head": {
+    "a": "search+network",
+    "b": "search+heuristic",
+    "wins_a": 4,
+    "wins_b": 8,
+    "draws": 2,
+    "games": 14,
+    "seconds": 43.89984009999898
+  },
+  "search_vs_greedy": {
+    "a": "search+network",
+    "b": "network alone (greedy)",
+    "wins_a": 13,
+    "wins_b": 0,
+    "draws": 1,
+    "games": 14,
+    "seconds": 19.72178740000527
+  }
+}
