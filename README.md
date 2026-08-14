@@ -73,18 +73,62 @@ where you can see it. That decision is a result, not a default —
 
 ## What you see in the UI
 
-- **Per-column bars, two brains.** Signed and centred — left of the midline is bad
-  for the mover. Proven verdicts turn green (win) or red (loss); the search's
-  guesses stay blue.
+The layout borrows its idiom from lichess's analysis board, because that page
+solves exactly this problem: show a lot of engine output without burying the game.
+
+- **A vertical eval bar** beside the board, from the mover's point of view. It
+  shows `#n` for a proven mate, `=` for a proven draw, and a number otherwise.
+- **The engine lines list**, sorted best-first, one row per legal column. Click a
+  row to play it. Only the top line shows a principal variation; the rest show
+  just their own move, because inventing continuations for them would be
+  fabrication.
+- **Two brains per line.** The search's score, and next to it a signed,
+  centre-anchored bar for the network's opinion of the same move. Proven verdicts
+  turn green (win) or red (loss); guesses stay blue.
 - **The disagreement callout.** Names the column where the network most disagrees
   with a *proof*. Only proofs count: comparing the network against another heuristic
   would be two opinions, and neither is evidence about the other.
 - **Ghost pieces** showing the principal variation, numbered in play order.
-- **Live search stats** — depth, nodes, transposition-table hits, milliseconds.
+- **Live search stats** — depth, nodes, kn/s, transposition-table hits, milliseconds.
+- **Assist toggle.** Ticking it outlines the column the search would play *for you*
+  and offers a one-key button, so the engine works as a coach rather than only as
+  an opponent.
 - **Difficulty as *n*-th best true move**, never random noise. Even at 0 the bot
   takes a win that is on the board and refuses to walk into a mate in two — a bot
   that plays well and then randomly throws a piece away reads as a bug, not as
   easy mode.
+- **Tabs** for Analysis, the move list, and past games.
+
+## Solver mode (difficulty 6)
+
+Connect 4 is solved — the first player wins by move 41 with perfect play. Skill 6
+is a separate mode rather than another notch on the dial, because what changes is
+the *budget*, not the move choice: six times the clock, and a transposition table
+that persists between moves. That second part matters more than the first.
+Consecutive searches in one game overlap enormously, so keeping the table turns
+each move into a continuation of the last rather than a fresh start. Entries are
+keyed by position, not by search, so the reuse is sound.
+
+It does **not** claim a solve from the empty board — proving that takes billions of
+nodes, which CPython is not going to do inside a web request. From roughly the
+eighth stone onward the search does resolve whole lines exactly, and the UI lights
+the `proven` badge only where it genuinely did. The mode also carries a banner
+saying plainly that the dataset network is out of the driving seat here. Claiming
+a solve we did not compute would be the one dishonest thing this project could
+ship.
+
+## Past games
+
+Finished games are appended to `data/games.jsonl` and shown under the History tab,
+with a win/loss/draw record. The archive stores the **move list**, not a board, so
+a game replays exactly and can be re-analysed later by a stronger search.
+
+JSONL rather than SQLite, deliberately: an append cannot corrupt games already
+written, a truncated final line is simply skipped on load, unknown fields from a
+newer version are ignored, and the file is readable without the program. A disk
+failure degrades durability and nothing else — the in-memory copy is stored before
+the write is attempted, so a logging problem can never lose the game you just
+played.
 
 ## Layout
 
@@ -94,12 +138,25 @@ src/connect4/
   engine.py     negamax + alpha-beta, transposition table, iterative deepening
   dataset.py    parsing, validation, 98 features (84 raw planes + 14 engineered)
   model.py      MLP written from scratch in NumPy — forward, backward, Adam
+  history.py    append-only JSONL archive of finished games
   api.py        FastAPI; a game is stored as its move list, not as a board
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          181 tests
+tests/          256 tests
 ```
+
+### Configuration
+
+Every knob is an environment variable, so nothing needs editing to run it
+differently:
+
+| variable | default | meaning |
+|---|---|---|
+| `CONNECT4_HOST` / `CONNECT4_PORT` | `127.0.0.1` / `8000` | where to serve |
+| `CONNECT4_TIME_LIMIT` | `2.0` | search budget per move, seconds |
+| `CONNECT4_SOLVER_TIME_LIMIT` | `12.0` | budget in solver mode |
+| `CONNECT4_HISTORY` | `data/games.jsonl` | game archive; unset path disables disk |
 
 ### The two claims worth checking first
 
@@ -133,7 +190,7 @@ entirely. Accuracy alone would have hidden that completely.
 
 ```bash
 uv sync
-uv run python -m pytest              # 181 tests
+uv run python -m pytest              # 256 tests
 uv run python -m scripts.train       # downloads the data, trains, prints baselines
 uv run python -m scripts.validate    # the three experiments above
 uv run python -m connect4.api        # play
