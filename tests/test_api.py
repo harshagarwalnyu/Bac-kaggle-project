@@ -22,7 +22,14 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from connect4.api import HUMAN, MAX_GAMES, SOLVER_SKILL, Store, app
+from connect4.api import (
+    HUMAN,
+    MAX_GAMES,
+    SOLVER_SKILL,
+    AnalysisCache,
+    Store,
+    app,
+)
 from connect4.bitboard import HEIGHT, WIDTH, Position
 from connect4.history import GameHistory
 
@@ -561,3 +568,61 @@ def test_health_advertises_the_solver(client):
     assert body["max_skill"] == SOLVER_SKILL
     # Solver mode is only meaningful if it actually gets more clock.
     assert body["solver_time_limit_s"] > body["time_limit_s"]
+
+
+# --------------------------------------------------------------------------
+# Search reuse
+# --------------------------------------------------------------------------
+
+
+def test_a_turn_searches_each_position_once(client, monkeypatch):
+    """A turn costs one search, not two.
+
+    Playing a stone answers with an analysis of the position that stone makes;
+    the client then immediately asks for a bot move, and the bot has to analyse
+    -- the very same position -- to choose one. That second search used to be a
+    full re-run of the first, a second apart, and it was most of the wall-clock
+    cost of a turn. This test fails if anyone reaches past ``_analyse`` to the
+    engine again.
+    """
+    app.state.analysis_cache = AnalysisCache()
+    searched: list[int] = []
+    engine = app.state.engine
+    search = engine.analyse
+
+    def counting(pos):
+        searched.append(pos.key())
+        return search(pos)
+
+    monkeypatch.setattr(engine, "analyse", counting)
+
+    game_id = new_game(client, skill=5)["game"]["id"]
+    play(client, game_id, 3)
+    assert len(searched) == 2, "the new game and the human's move search once each"
+    human_made = searched[-1]
+
+    client.post(f"/api/games/{game_id}/bot-move", json={})
+    assert human_made not in searched[2:], "the bot re-searched the position it was given"
+    assert len(searched) == 3, "a bot move should only search the position it creates"
+    assert app.state.analysis_cache.hits == 1
+
+
+def test_the_cache_evicts_the_oldest_entry_rather_than_growing_forever():
+    # A long session would otherwise hold one analysis per position ever seen.
+    cache = AnalysisCache(capacity=2)
+    cache.put((1, False), "first")
+    cache.put((2, False), "second")
+    cache.put((3, False), "third")
+    assert cache.get((1, False)) is None
+    assert cache.get((2, False)) == "second"
+    assert cache.get((3, False)) == "third"
+
+
+def test_solver_and_ordinary_analyses_of_one_position_do_not_collide():
+    # Same board, two engines, two budgets: the deeper answer must not be
+    # served to a normal game, nor the shallow one to the solver.
+    cache = AnalysisCache()
+    cache.put((7, False), "quick")
+    cache.put((7, True), "deep")
+    assert cache.get((7, False)) == "quick"
+    assert cache.get((7, True)) == "deep"

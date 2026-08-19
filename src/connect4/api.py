@@ -285,10 +285,56 @@ async def lifespan(app: FastAPI):
 
     app.state.store = Store()
     app.state.history = GameHistory(HISTORY_PATH)
+    app.state.analysis_cache = AnalysisCache()
     yield
 
 
 app = FastAPI(title="Connect 4 glass-box bot", lifespan=lifespan)
+
+
+class AnalysisCache:
+    """Remembers the search's answer for a position, so it is never asked twice.
+
+    One turn used to cost *three* searches of which two were identical. Playing
+    a stone returns an analysis of the position that stone creates; the client
+    then immediately asks for a bot move, and the bot analyses -- the very same
+    position -- to choose one. Same board, same engine, same answer, a second
+    apart.
+
+    Caching is sound rather than merely convenient because the normal engine
+    clears its transposition table at the start of every ``analyse``, so a
+    position's analysis is a pure function of the position. (The solver engine
+    keeps its table, so a later search could in principle prove more; returning
+    the earlier answer is a deliberate trade of the last drop of depth for not
+    making a person wait twelve seconds twice for one move.)
+
+    Bounded and FIFO because a long session would otherwise accumulate one entry
+    per position ever seen. Insertion order is dict order in CPython, so the
+    oldest key is simply the first one.
+    """
+
+    def __init__(self, capacity: int = 512) -> None:
+        self._entries: dict[tuple[int, bool], Analysis] = {}
+        self._capacity = capacity
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: tuple[int, bool]) -> Analysis | None:
+        found = self._entries.get(key)
+        if found is None:
+            self.misses += 1
+        else:
+            self.hits += 1
+        return found
+
+    def put(self, key: tuple[int, bool], analysis: Analysis) -> None:
+        # A racing writer can only ever store the same value for the same key,
+        # so no lock is needed here: the worst case is two threads computing
+        # the same analysis, which is exactly what happened before the cache.
+        entries = self._entries
+        entries[key] = analysis
+        while len(entries) > self._capacity:
+            entries.pop(next(iter(entries)), None)
 
 
 def _engine_for(skill: int) -> Engine:
@@ -298,14 +344,31 @@ def _engine_for(skill: int) -> Engine:
     return app.state.solver if skill >= SOLVER_SKILL else app.state.engine
 
 
+def _analyse(pos: Position, skill: int) -> Analysis:
+    """The only place a search is started. Memoised -- see :class:`AnalysisCache`.
+
+    Keyed on the position *and* on whether this is solver mode, because the two
+    engines have different budgets and would answer differently about the same
+    board.
+    """
+    key = (pos.key(), skill >= SOLVER_SKILL)
+    cached = app.state.analysis_cache.get(key)
+    if cached is not None:
+        return cached
+    analysis = _engine_for(skill).analyse(pos)
+    app.state.analysis_cache.put(key, analysis)
+    return analysis
+
+
 def _analysis_payload(pos: Position, skill: int = 5) -> dict | None:
     """Analyse ``pos``, or return ``None`` if the game is already over."""
     if pos.has_won() or pos.is_draw():
         return None
-    analysis = _engine_for(skill).analyse(pos)
     # With no trained model the engine still has plenty to say; the dataset
     # panel simply reports nothing rather than the server refusing to answer.
-    return describe_analysis(analysis, pos, app.state.evaluator or _NULL_EVALUATOR)
+    return describe_analysis(
+        _analyse(pos, skill), pos, app.state.evaluator or _NULL_EVALUATOR
+    )
 
 
 def _archive(game: Game) -> None:
@@ -405,8 +468,10 @@ def bot_move(game_id: str, request: BotMoveRequest) -> dict:
     # Analysed once and reused: ``choose_move`` runs its own search, so asking
     # it for a move and then separately analysing the same position would pay
     # for the search twice and could -- if anything were nondeterministic --
-    # report an opinion that did not match the move played.
-    analysis = _engine_for(game.skill).analyse(pos)
+    # report an opinion that did not match the move played. Going through
+    # ``_analyse`` also means the search the *client's* own move already paid
+    # for is reused here rather than repeated, which is most of a turn's cost.
+    analysis = _analyse(pos, game.skill)
     column = _pick(analysis, game.skill)
     if column < 0:
         raise HTTPException(status_code=409, detail="no legal move")
