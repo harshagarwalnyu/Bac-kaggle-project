@@ -123,12 +123,12 @@ def verdict_agreement(evaluator, n_positions: int, depth: int, time_limit: float
             positions, labels,
         ),
         score_positions(
-            "search + hand-written heuristic",
+            "search + hand-written heuristic (the shipped bot)",
             lambda pos: classify(plain_engine.analyse(pos).evaluations[0].score),
             positions, labels,
         ),
         score_positions(
-            "search + network (the shipped bot)",
+            "search + network",
             lambda pos: classify(neural_engine.analyse(pos).evaluations[0].score),
             positions, labels,
         ),

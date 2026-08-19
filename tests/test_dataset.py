@@ -24,7 +24,6 @@ from connect4.dataset import (
     LABEL_TO_INDEX,
     N_FEATURES,
     RAW_FEATURES,
-    Sample,
     encode,
     encode_batch,
     load_samples,

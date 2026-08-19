@@ -48,9 +48,13 @@ main {
   max-width: 1180px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(320px, 480px) 1fr;
+  grid-template-columns: minmax(320px, 560px) 1fr;
   gap: 26px;
-  align-items: start;
+  /* `start` left the panel shrink-wrapped to its content, so its bottom edge
+     landed at a different height from the board's on every tab. Stretching
+     makes the two columns agree, and the panel handles the extra height by
+     scrolling its body rather than by growing. */
+  align-items: stretch;
 }
 
 @media (max-width: 900px) {
@@ -75,7 +79,10 @@ main {
    towards me" reads as "I am winning" without a legend. */
 .evalbar {
   position: relative;
-  width: 20px;
+  /* Wide enough for the widest label it can hold. The number is up to five
+     monospace characters ("-12.4", "#-11"), which does not fit in the 20px a
+     pure bar would need, and a clipped evaluation is worse than a wider bar. */
+  width: 34px;
   flex: none;
   border-radius: 8px;
   overflow: hidden;
@@ -95,14 +102,22 @@ main {
 .evalbar.proof-loss .evalbar-fill { background: var(--player); }
 .evalbar.proof-loss { background: var(--loss); }
 
+/* The number rides on whatever the bar happens to be showing underneath it,
+   and that is four different colours depending on the verdict -- so a single
+   fixed ink colour is legible for some of them and invisible for the rest.
+   Worst case is a lost position: the fill has retreated off the bottom of the
+   bar entirely and near-black text ends up on the dark red background. Giving
+   the text its own opaque plate makes it independent of all of that. */
 .evalbar-text {
   position: absolute;
-  left: 0; right: 0; bottom: 4px;
+  left: 2px; right: 2px; bottom: 3px;
+  padding: 2px 0;
+  border-radius: 5px;
   text-align: center;
-  font: 700 9px/1 var(--mono);
-  color: #0e1116;
+  font: 700 11.5px/1 var(--mono);
+  color: #f2f6fb;
+  background: rgba(10, 13, 18, 0.82);
   letter-spacing: -0.03em;
-  mix-blend-mode: normal;
 }
 
 /* The board is seven *columns*, not forty-two cells in a grid. That is what
@@ -233,27 +248,40 @@ input[type="range"].solver { accent-color: var(--proof); }
 
 /* A miniature of the on-board ghost, so the explanation shows the thing it is
    explaining instead of describing it. */
+/* 16px of circle with a 2px dashed border leaves 12px of usable middle, and a
+   10px digit does not fit in it -- the numeral collides with the dashes and a
+   two-digit ply is simply clipped. Bigger circle, thinner border, and a digit
+   sized off the circle rather than off the paragraph. `line-height: 1` matters:
+   inheriting the surrounding paragraph's leading pushes the numeral off centre
+   inside a box this small. */
 .ghost-key {
   display: inline-grid;
   place-items: center;
-  width: 16px; height: 16px;
+  width: 20px; height: 20px;
+  box-sizing: border-box;
   border-radius: 50%;
-  border: 2px dashed currentColor;
-  font-size: 10px;
-  font-weight: 700;
-  vertical-align: -3px;
+  border: 1.5px dashed currentcolor;
+  font: 700 11px/1 var(--mono);
+  vertical-align: -5px;
 }
 .ghost-key.p1 { color: var(--player); }
 .ghost-key.p2 { color: var(--bot); }
 
 /* ---------------------------------------------------------------- panel */
 
+/* Stretched to the board's height rather than shrink-wrapped to its content,
+   so the two columns share a bottom edge instead of the panel ending somewhere
+   arbitrary up the side of the board. The tab strip stays put and the body
+   scrolls, which also stops the tallest tab (History, after a few games) from
+   deciding the height of the whole page. */
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 0 0 18px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .tabs {
@@ -279,6 +307,16 @@ input[type="range"].solver { accent-color: var(--proof); }
 }
 
 .tab-body { padding: 16px 20px 0; }
+/* Guarded on :not([hidden]) so this never resurrects a hidden tab -- a bare
+   `.tab-body { flex: 1 }` would set a display and beat the `hidden` attribute,
+   showing all three tabs at once. `min-height: 0` is what actually lets it
+   scroll: a flex item's default `min-height: auto` refuses to shrink below its
+   content, so without it the panel grows instead of the body scrolling. */
+.tab-body:not([hidden]) {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 .stats {
   color: var(--ink-dim);

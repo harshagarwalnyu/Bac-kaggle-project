@@ -2,7 +2,7 @@
 
 Two independent brains reason about every position and both publish their
 opinion: an exact alpha-beta search over bitboards, and a neural evaluator
-trained from scratch on the Kaggle/UCI connect-4 dataset.
+trained from scratch on the UCI connect-4 opening database.
 """
 
 from .bitboard import HEIGHT, WIDTH, Position

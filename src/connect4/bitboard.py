@@ -53,7 +53,7 @@ of a separate minimax with two mirrored branches.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 WIDTH = 7
 HEIGHT = 6
@@ -68,6 +68,10 @@ _COL_STRIDE = HEIGHT + 1  # 7
 #   6  -> diagonal "\"  (one column right, one row down)
 #   8  -> diagonal "/"  (one column right, one row up)
 _DIRECTIONS = (1, _COL_STRIDE, _COL_STRIDE - 1, _COL_STRIDE + 1)
+
+# The same four directions, with their doubled and tripled shifts worked out
+# once instead of on every visit to the hottest function in the program.
+_DIRECTION_STEPS = tuple((d, 2 * d, 3 * d) for d in _DIRECTIONS)
 
 # A bit set at the bottom cell of every column: 0b1000000100000010000001000000100000010000001
 BOTTOM_MASK_ALL = sum(1 << (col * _COL_STRIDE) for col in range(WIDTH))
@@ -90,19 +94,24 @@ MAX_SCORE = (WIDTH * HEIGHT + 1) // 2 - 3
 MOVE_ORDER = (3, 2, 4, 1, 5, 0, 6)
 
 
+_BOTTOM_MASKS = tuple(1 << (col * _COL_STRIDE) for col in range(WIDTH))
+_TOP_MASKS = tuple(1 << (col * _COL_STRIDE + HEIGHT - 1) for col in range(WIDTH))
+_COLUMN_MASKS = tuple(((1 << HEIGHT) - 1) << (col * _COL_STRIDE) for col in range(WIDTH))
+
+
 def bottom_mask(col: int) -> int:
     """Bit for the bottom cell of ``col``."""
-    return 1 << (col * _COL_STRIDE)
+    return _BOTTOM_MASKS[col]
 
 
 def top_mask(col: int) -> int:
     """Bit for the topmost *playable* cell of ``col`` (row 5, not the sentinel)."""
-    return 1 << (col * _COL_STRIDE + HEIGHT - 1)
+    return _TOP_MASKS[col]
 
 
 def column_mask(col: int) -> int:
     """All six playable bits of ``col``."""
-    return ((1 << HEIGHT) - 1) << (col * _COL_STRIDE)
+    return _COLUMN_MASKS[col]
 
 
 def popcount(bits: int) -> int:
@@ -146,8 +155,7 @@ def _winning_spots(position: int, mask: int) -> int:
     cannot grow beyond the 49-bit board.
     """
     result = 0
-    for direction in _DIRECTIONS:
-        d1, d2, d3 = direction, 2 * direction, 3 * direction
+    for d1, d2, d3 in _DIRECTION_STEPS:
 
         # Two stones extending upward from a candidate cell...
         pair_up = (position << d1) & (position << d2) & FULL_MASK
@@ -175,6 +183,16 @@ class Position:
     mask: int = 0  # stones belonging to either player
     moves: int = 0  # plies played so far; parity tells us whose turn it is
 
+    # Both threat maps, computed on first use and remembered. Every node of
+    # the search asks for them two or three times over -- the move filter, the
+    # ordering, the leaf evaluator -- and the answer cannot change while the
+    # board does not. -1 means not computed yet, which no real map can be.
+    # Excluded from equality and repr: they are a consequence of the board,
+    # not part of it, so two equal boards stay equal whether or not either has
+    # been asked about its threats.
+    _wins: int = field(default=-1, compare=False, repr=False)
+    _opponent_wins: int = field(default=-1, compare=False, repr=False)
+
     # ---------------------------------------------------------------- queries
 
     def can_play(self, col: int) -> bool:
@@ -183,7 +201,7 @@ class Position:
         We only need to test the *top* playable cell. If it is empty the column
         has room; if it is occupied the column is full. One AND, no counting.
         """
-        return (self.mask & top_mask(col)) == 0
+        return (self.mask & _TOP_MASKS[col]) == 0
 
     def legal_moves(self) -> list[int]:
         """Playable columns, in centre-first search order."""
@@ -195,11 +213,19 @@ class Position:
 
     def winning_spots(self) -> int:
         """Empty cells that would immediately win *for the player to move*."""
-        return _winning_spots(self.position, self.mask)
+        spots = self._wins
+        if spots < 0:
+            spots = self._wins = _winning_spots(self.position, self.mask)
+        return spots
 
     def opponent_winning_spots(self) -> int:
         """Empty cells that would immediately win *for the opponent*."""
-        return _winning_spots(self.position ^ self.mask, self.mask)
+        spots = self._opponent_wins
+        if spots < 0:
+            spots = self._opponent_wins = _winning_spots(
+                self.position ^ self.mask, self.mask
+            )
+        return spots
 
     def possible_moves(self) -> int:
         """Bitmap of the cells that are actually playable right now.
@@ -262,7 +288,7 @@ class Position:
 
     def _landing_bit(self, col: int) -> int:
         """Which cell a stone dropped into ``col`` comes to rest in."""
-        return (self.mask + bottom_mask(col)) & column_mask(col)
+        return (self.mask + _BOTTOM_MASKS[col]) & _COLUMN_MASKS[col]
 
     def play(self, col: int) -> None:
         """Drop a stone into ``col`` and hand the turn over. Mutates in place.
@@ -275,17 +301,31 @@ class Position:
         ``position`` describes.
         """
         self.position ^= self.mask
-        self.mask |= self.mask + bottom_mask(col)
+        self.mask |= self.mask + _BOTTOM_MASKS[col]
         self.moves += 1
+        # The board moved, so anything remembered about it is now a lie.
+        self._wins = self._opponent_wins = -1
 
     def copy(self) -> Position:
-        return Position(self.position, self.mask, self.moves)
+        # The threat maps come along: a copy is the same board, and the search
+        # copies far more often than it plays.
+        return Position(
+            self.position, self.mask, self.moves, self._wins, self._opponent_wins
+        )
 
     def played(self, col: int) -> Position:
-        """Non-mutating :meth:`play` -- returns the resulting position."""
-        child = self.copy()
-        child.play(col)
-        return child
+        """Non-mutating :meth:`play` -- returns the resulting position.
+
+        Spelled out rather than ``copy`` then ``play`` because the search builds
+        one of these for every move it considers, and the two extra calls plus
+        the throwaway threat maps of the intermediate copy are pure overhead.
+        The arithmetic is exactly :meth:`play`'s, and the differential tests hold
+        both to the same slow reference implementation.
+        """
+        mask = self.mask
+        return Position(
+            self.position ^ mask, mask | (mask + _BOTTOM_MASKS[col]), self.moves + 1
+        )
 
     # ------------------------------------------------------- interop / display
 

@@ -1,0 +1,8 @@
+# One line ending in the repository, whatever the editor on the machine does.
+# Without this the same file arrives as CRLF from one tool and LF from another,
+# and a one-line change shows up as a whole-file diff.
+* text=auto eol=lf
+
+# Binary: never touched, never diffed as text.
+*.npz binary
+*.png binary

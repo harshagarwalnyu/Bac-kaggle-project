@@ -15,6 +15,7 @@ import random
 
 import pytest
 
+from connect4 import bitboard
 from connect4.bitboard import (
     HEIGHT,
     MOVE_ORDER,
@@ -404,3 +405,151 @@ def test_draw_detection_on_a_full_board():
             pos.play(col)
     assert pos.moves == WIDTH * HEIGHT
     assert pos.is_draw()
+
+
+# --------------------------------------------------------------------------
+# Remembered threat maps
+# --------------------------------------------------------------------------
+
+
+def _fresh(pos: Position) -> Position:
+    """The same board, with nothing remembered about it."""
+    return Position(pos.position, pos.mask, pos.moves)
+
+
+def test_playing_a_stone_forgets_the_remembered_threat_maps():
+    """The classic failure mode of a cache on a mutable object: a stale answer.
+
+    ``play`` mutates in place, so both maps have to be dropped -- and the way to
+    prove it is to ask *before* the move, which is what fills them.
+    """
+    pos = Position.from_moves([3, 2, 3, 4])
+    pos.winning_spots()
+    pos.opponent_winning_spots()
+
+    pos.play(3)
+
+    clean = _fresh(pos)
+    assert pos.winning_spots() == clean.winning_spots()
+    assert pos.opponent_winning_spots() == clean.opponent_winning_spots()
+
+
+def test_a_second_ask_does_not_recompute_the_map(monkeypatch):
+    """The memo must actually memoise, not merely answer correctly.
+
+    Every other test here compares *values*, so all of them still pass if the
+    caching is deleted and each call recomputes -- the point of this PR would
+    be gone with the suite still green. This one counts the calls that reach
+    the bit twiddling instead: two maps asked twice is two computations.
+    """
+    calls = []
+    real = bitboard._winning_spots
+
+    def counted(position: int, mask: int) -> int:
+        calls.append((position, mask))
+        return real(position, mask)
+
+    monkeypatch.setattr(bitboard, "_winning_spots", counted)
+
+    pos = Position.from_moves([3, 3, 4])
+    calls.clear()  # building the board asks its own questions; start from zero.
+
+    for _ in range(3):
+        pos.winning_spots()
+        pos.opponent_winning_spots()
+    assert len(calls) == 2, calls
+
+    # ...and the memo is dropped the moment the board moves on.
+    pos.play(2)
+    calls.clear()
+    pos.winning_spots()
+    pos.opponent_winning_spots()
+    assert len(calls) == 2, calls
+
+
+def test_a_remembered_map_does_not_change_what_a_position_is():
+    """Two identical boards stay equal even if only one has been asked.
+
+    The maps are a consequence of the board rather than part of it, so they are
+    excluded from equality. Were they not, a position would stop being equal to
+    itself halfway through a search.
+    """
+    asked = Position.from_moves([3, 3, 4])
+    untouched = Position.from_moves([3, 3, 4])
+    asked.winning_spots()
+    asked.opponent_winning_spots()
+    assert asked == untouched
+    assert repr(asked) == repr(untouched)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_remembered_maps_agree_with_a_fresh_position(seed):
+    """Differential test for the cache: same board, same answer, always.
+
+    Every position reached along a random game is asked for both maps twice --
+    once as it stands, having already answered other questions during play, and
+    once as a position that has never been asked anything.
+    """
+    rng = random.Random(5000 + seed)
+    for _ in range(60):
+        pos = _random_position(rng)
+        clean = _fresh(pos)
+        assert pos.winning_spots() == clean.winning_spots(), f"\n{pos}"
+        assert pos.opponent_winning_spots() == clean.opponent_winning_spots(), f"\n{pos}"
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_played_agrees_with_copy_then_play(seed):
+    """``played`` spells the move arithmetic out for speed; it must not drift.
+
+    It is the one place in this file where the same rule is written twice, so it
+    is the one place that needs a test whose only job is to compare the two.
+    """
+    rng = random.Random(9000 + seed)
+    for _ in range(60):
+        pos = _random_position(rng)
+        if pos.has_won():
+            continue
+        for col in pos.legal_moves():
+            stepwise = pos.copy()
+            stepwise.play(col)
+            direct = pos.played(col)
+            assert (direct.position, direct.mask, direct.moves) == (
+                stepwise.position,
+                stepwise.mask,
+                stepwise.moves,
+            ), f"column {col}\n{pos}"
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_our_move_can_never_hand_the_opponent_a_new_threat(seed):
+    """The opponent's threat map only ever shrinks when we play.
+
+    Not a curiosity: the move ordering in ``Engine._ordered_moves`` scores a
+    candidate by the threats it creates and *not* by the threats it concedes,
+    and this is why the second term would be worthless. A winning spot has to
+    be an empty cell of a run of three of theirs; our stone changes neither
+    their stones nor the geometry, so the only thing it can do to their map is
+    delete the entry it lands on. Anything computing the difference would be
+    paying for a second threat map per child to add zero.
+    """
+    rng = random.Random(seed)
+    for _ in range(150):
+        pos = Position()
+        for _ in range(rng.randint(0, 25)):
+            legal = [c for c in range(WIDTH) if pos.can_play(c)]
+            if not legal or pos.has_won():
+                break
+            pos = pos.played(rng.choice(legal))
+        if pos.has_won() or pos.is_draw():
+            continue
+
+        theirs = pos.opponent_winning_spots()
+        for col in range(WIDTH):
+            if not pos.can_play(col):
+                continue
+            # In the child the opponent is to move, so *their* map is the one
+            # ``winning_spots`` describes.
+            after = pos.played(col).winning_spots()
+            assert not after & ~theirs, f"column {col} created a threat\n{pos}"
+            assert after == theirs & ~pos._landing_bit(col) or after == theirs

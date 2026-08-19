@@ -19,6 +19,9 @@ tests would have caught a wrong evaluator being wired in.
 
 from __future__ import annotations
 
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -29,13 +32,18 @@ from connect4.api import (
     MAX_GAMES,
     ROOT,
     SOLVER_SKILL,
+    TIME_LIMIT_S,
+    AnalysisCache,
     Store,
+    Warmer,
+    _analyse,
+    _analysis_payload,
     _history_path,
     _pick,
     app,
 )
 from connect4.bitboard import HEIGHT, WIDTH, Position
-from connect4.engine import Analysis, MoveEvaluation, SearchStats
+from connect4.engine import Analysis, Engine, MoveEvaluation, SearchStats
 from connect4.history import GameHistory
 
 
@@ -48,6 +56,11 @@ def client():
         # test that asserts on history must not inherit yesterday's games.
         # Swapping in a pathless history gives both: same code, no disk.
         app.state.history = GameHistory(None)
+        # And the warmer is off, because a background thread quietly filling
+        # the analysis cache would make every count of searches in this file
+        # depend on how fast the machine happened to be. The tests that are
+        # *about* warming turn it back on and wait for it explicitly.
+        app.state.warmer.disable()
         yield test_client
 
 
@@ -568,6 +581,279 @@ def test_health_advertises_the_solver(client):
     assert body["max_skill"] == SOLVER_SKILL
     # Solver mode is only meaningful if it actually gets more clock.
     assert body["solver_time_limit_s"] > body["time_limit_s"]
+
+
+# --------------------------------------------------------------------------
+# Search reuse
+# --------------------------------------------------------------------------
+
+
+def test_a_turn_searches_each_position_once(client, monkeypatch):
+    """A turn costs one search, not two.
+
+    Playing a stone answers with an analysis of the position that stone makes;
+    the client then immediately asks for a bot move, and the bot has to analyse
+    -- the very same position -- to choose one. That second search used to be a
+    full re-run of the first, a second apart, and it was most of the wall-clock
+    cost of a turn. This test fails if anyone reaches past ``_analyse`` to the
+    engine again.
+    """
+    app.state.analysis_cache.clear()
+    searched: list[int] = []
+    engine = app.state.engine
+    search = engine.analyse
+
+    def counting(pos):
+        searched.append(pos.key())
+        return search(pos)
+
+    monkeypatch.setattr(engine, "analyse", counting)
+
+    game_id = new_game(client, skill=5)["game"]["id"]
+    play(client, game_id, 3)
+    assert len(searched) == 2, "the new game and the human's move search once each"
+    human_made = searched[-1]
+
+    client.post(f"/api/games/{game_id}/bot-move", json={})
+    assert human_made not in searched[2:], "the bot re-searched the position it was given"
+    assert len(searched) == 3, "a bot move should only search the position it creates"
+    assert app.state.analysis_cache.hits == 1
+
+
+def test_the_cache_evicts_the_oldest_entry_rather_than_growing_forever():
+    # A long session would otherwise hold one analysis per position ever seen.
+    cache = AnalysisCache(capacity=2)
+    cache.put((1, False), "first")
+    cache.put((2, False), "second")
+    cache.put((3, False), "third")
+    assert cache.get((1, False)) is None
+    assert cache.get((2, False)) == "second"
+    assert cache.get((3, False)) == "third"
+
+
+def test_the_cache_survives_the_warmer_and_a_request_writing_at_once():
+    """Eviction is two steps, and the warmer runs while requests do.
+
+    ``put`` names the oldest key and then drops it. Between those two steps
+    another thread can insert, and naming the oldest key iterates the dict --
+    which is exactly what raises RuntimeError("dictionary changed size during
+    iteration"). The cache is full whenever a session runs long enough, and the
+    warmer writes to it from its own thread by design, so both halves of that
+    race are ordinary operation rather than a contrived one.
+
+    The counters are checked in the same test because they have the quieter
+    version of the same bug: ``+= 1`` reads and then writes, so a racing pair
+    loses a count and the assertions about searches-per-turn start flickering.
+    """
+    cache = AnalysisCache(capacity=8)
+    writers, reads_per_writer = 8, 400
+    errors: list[BaseException] = []
+    start = threading.Barrier(writers)
+
+    def hammer(worker: int) -> None:
+        start.wait()
+        try:
+            for i in range(reads_per_writer):
+                cache.put((worker * reads_per_writer + i, False), "analysis")
+                cache.get((worker, False))
+                cache.peek((worker, False))
+        except BaseException as error:  # noqa: BLE001 -- the point of the test
+            errors.append(error)
+
+    # The default switch interval is long enough that the two steps of an
+    # eviction usually run without interruption; shortening it makes the race
+    # reliable instead of lucky.
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=hammer, args=(w,)) for w in range(writers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "a cache operation deadlocked"
+    finally:
+        sys.setswitchinterval(previous)
+
+    assert not errors, f"concurrent cache use raised {errors[0]!r}"
+    assert len(cache._entries) <= 8, "eviction stopped keeping the cache bounded"
+    assert cache.hits + cache.misses == writers * reads_per_writer, (
+        "a racing pair of ++ lost a count"
+    )
+
+
+def test_the_solver_panels_short_search_never_feeds_the_bots_own_move(client, monkeypatch):
+    """Solver mode runs two searches per turn on two different clocks.
+
+    The move it plays gets the long budget; the commentary that follows is
+    deliberately capped at the normal one, so the user does not wait twice.
+    Those are different answers about the same board -- the capped one is
+    shallower -- so they must not share a cache entry. Sharing it would let the
+    panel's cheap search decide the bot's move, silently costing solver mode
+    most of its strength.
+    """
+    app.state.analysis_cache.clear()
+    budgets = []
+
+    def recorded(position, *, time_limit_s=None):
+        budgets.append(time_limit_s)
+        return Analysis(
+            best_move=3,
+            evaluations=[MoveEvaluation(column=3, score=0.5, exact=False)],
+            stats=SearchStats(),
+        )
+
+    monkeypatch.setattr(app.state.solver, "analyse", recorded)
+    pos = Position.from_moves([3, 3])
+
+    _analysis_payload(pos, SOLVER_SKILL)
+    assert budgets == [TIME_LIMIT_S], "the panel's search must be capped"
+
+    _analyse(pos, SOLVER_SKILL)
+    assert budgets == [TIME_LIMIT_S, None], (
+        "the bot's own search must not be served the capped answer"
+    )
+
+    # The other direction is sound and worth keeping: the full answer is at
+    # least as deep as a capped one, so the panel reuses it rather than paying
+    # for a third search.
+    _analysis_payload(pos, SOLVER_SKILL)
+    assert budgets == [TIME_LIMIT_S, None]
+
+
+def test_capping_is_ignored_outside_solver_mode(client, monkeypatch):
+    """An ordinary turn must stay one search.
+
+    ``TIME_LIMIT_S`` is already the normal engine's budget, so a capped request
+    and an uncapped one are the same question; keying them apart would put the
+    turn back to two searches, which is exactly what the cache exists to stop.
+    """
+    app.state.analysis_cache.clear()
+    calls = []
+
+    def recorded(position, *, time_limit_s=None):
+        calls.append(time_limit_s)
+        return Analysis(
+            best_move=3,
+            evaluations=[MoveEvaluation(column=3, score=0.5, exact=False)],
+            stats=SearchStats(),
+        )
+
+    monkeypatch.setattr(app.state.engine, "analyse", recorded)
+    pos = Position.from_moves([3, 3])
+
+    _analysis_payload(pos, 5)
+    _analyse(pos, 5)
+    assert calls == [None], calls
+
+
+def test_solver_and_ordinary_analyses_of_one_position_do_not_collide():
+    # Same board, two engines, two budgets: the deeper answer must not be
+    # served to a normal game, nor the shallow one to the solver.
+    cache = AnalysisCache()
+    cache.put((7, False), "quick")
+    cache.put((7, True), "deep")
+    assert cache.get((7, False)) == "quick"
+    assert cache.get((7, True)) == "deep"
+
+
+# --------------------------------------------------------------------------
+# Thinking ahead
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def warming():
+    """The app with its background thinking switched back on.
+
+    Two adjustments make this fast enough to be a test rather than a wait: the
+    cache starts empty, so nothing here can pass on work an earlier test paid
+    for, and the background engine gets a fifth of a second per position instead
+    of a full one. The budget is not what is under test; the plumbing is.
+    """
+    warmer = app.state.warmer
+    app.state.analysis_cache.clear()
+    warmer.engine.time_limit_s = 0.2
+    warmer.enabled = True
+    try:
+        yield warmer
+    finally:
+        warmer.disable()
+        warmer.engine.time_limit_s = TIME_LIMIT_S
+        app.state.analysis_cache.clear()
+
+
+def test_waiting_for_the_human_is_spent_analysing_their_replies(client, warming):
+    new_game(client)
+    assert warming.wait_idle(timeout=30.0), "the warmer never emptied its queue"
+
+    # Every column the human could play from the empty board is now a position
+    # the server has already thought about.
+    empty = Position()
+    for column in empty.legal_moves():
+        key = (empty.played(column).key(), False, False)
+        assert app.state.analysis_cache.peek(key) is not None, f"column {column} left cold"
+
+
+def test_a_warmed_move_costs_no_search_at_all(client, warming):
+    game_id = new_game(client)["game"]["id"]
+    assert warming.wait_idle(timeout=30.0)
+
+    searched: list[int] = []
+    engine = app.state.engine
+    search = engine.analyse
+
+    def counting(pos):
+        searched.append(pos.key())
+        return search(pos)
+
+    engine.analyse = counting
+    try:
+        body = play(client, game_id, 3)
+    finally:
+        del engine.analyse
+
+    assert body["analysis"] is not None, "the response still carries a full analysis"
+    assert searched == [], "the human's move re-searched a position already warmed"
+
+
+def test_solver_games_are_never_warmed(client, warming):
+    # The solver keeps its transposition table between searches, so what it can
+    # prove depends on what it was asked before -- a background answer would not
+    # be the answer a request would have got.
+    before = warming.warmed
+    new_game(client, skill=SOLVER_SKILL)
+    assert warming.wait_idle(timeout=10.0)
+    assert warming.warmed == before
+
+
+def test_an_interrupted_search_is_never_cached():
+    # Aborting mid-search leaves the engine holding whatever depth it finished,
+    # which is shallower than the request path would have produced. Storing that
+    # would make a cache hit worse than a cache miss.
+    position = Position.from_moves([3, 3, 4])
+    cache = AnalysisCache()
+    warmer = Warmer(engine=Engine(time_limit_s=30.0), cache=cache, enabled=True)
+    try:
+        warmer.schedule([position])
+        time.sleep(0.2)
+        warmer.suspend()
+        assert warmer.wait_idle(timeout=10.0), "the worker did not stop"
+        assert warmer.warmed == 0
+        assert cache.peek((position.key(), False)) is None
+    finally:
+        warmer.close()
+
+
+def test_a_disabled_warmer_ignores_work(client):
+    # The default in this suite, asserted rather than assumed: nothing in the
+    # request path may switch background thinking back on.
+    warmer = app.state.warmer
+    assert warmer.enabled is False
+    before = warmer.warmed
+    warmer.schedule([Position.from_moves([0])])
+    assert warmer.wait_idle(timeout=5.0)
+    assert warmer.warmed == before
 
 
 # --------------------------------------------------------------------------

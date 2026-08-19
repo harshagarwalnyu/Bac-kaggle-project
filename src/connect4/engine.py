@@ -19,7 +19,7 @@ any given answer:
 *Heuristic.*  When the depth limit is hit first, the leaf is scored by an
               evaluator instead. That evaluator is the pluggable seam of this
               project -- it can be the hand-written threat heuristic, or the
-              neural network trained on the Kaggle dataset. Same search, two
+              neural network trained on the UCI dataset. Same search, two
               different brains, directly comparable.
 
 Every score carries a flag saying which regime produced it, and the UI shows
@@ -30,8 +30,9 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from operator import itemgetter
 
 from .bitboard import (
     HEIGHT,
@@ -53,6 +54,14 @@ MAX_PLIES = WIDTH * HEIGHT
 EXACT, LOWER_BOUND, UPPER_BOUND = 0, 1, 2
 
 Evaluator = Callable[[Position], float]
+
+# Sort key for move ordering, hoisted so the sort stays in C instead of
+# calling back into Python once per element.
+_threat_rank = itemgetter(0)
+
+# At or below this depth the children are leaves, and a leaf costs one call to
+# the evaluator -- less than working out which leaf to look at first.
+_ORDER_MIN_DEPTH = 1
 
 
 def heuristic_evaluator(pos: Position) -> float:
@@ -258,6 +267,18 @@ class Engine:
             stats=self._stats,
         )
 
+    def abort(self) -> None:
+        """Ask a search running on another thread to stop at its next check.
+
+        The deadline is already consulted every 2048 nodes, so moving it into
+        the past ends the search in a fraction of a millisecond without adding
+        a second flag to the hot path. Only meaningful for an engine some
+        background thread owns -- see ``Warmer`` in the API. The search comes
+        back with ``stats.aborted`` set, which is the caller's cue to throw the
+        partial answer away rather than believe it.
+        """
+        self._deadline = 0.0
+
     def choose_move(self, pos: Position, skill: int = 5) -> int:
         """Pick a move at a given strength, 0 (weakest) to 5 (full strength).
 
@@ -370,8 +391,8 @@ class Engine:
         best_score = -float("inf")
         best_col = -1
 
-        for col in self._ordered_moves(pos, playable, cached):
-            score = -self._negamax(pos.played(col), depth - 1, -beta, -alpha)
+        for col, child in self._ordered_moves(pos, playable, cached, depth):
+            score = -self._negamax(child, depth - 1, -beta, -alpha)
             if score > best_score:
                 best_score, best_col = score, col
             if best_score > alpha:
@@ -391,8 +412,10 @@ class Engine:
 
         return best_score
 
-    def _ordered_moves(self, pos: Position, playable: int, cached) -> list[int]:
-        """Order candidate moves so the best is tried first.
+    def _ordered_moves(
+        self, pos: Position, playable: int, cached, depth: int
+    ) -> Iterator[tuple[int, Position]]:
+        """Yield candidate moves best first, each with the position it leads to.
 
         Alpha-beta's saving depends almost entirely on ordering: with perfect
         ordering it examines the square root of the nodes that plain minimax
@@ -402,37 +425,67 @@ class Engine:
            transposition table). Shallow search is a good predictor of deep
            search, which is what makes iterative deepening pay for itself.
         2. Otherwise centre-out, plus a bonus for moves that create threats.
+
+        Signal 2 is not free: it costs a board and a threat map per column. Two
+        things follow, both of them measured rather than assumed.
+
+        When there is a table move it usually causes a cutoff on its own, so the
+        ranking is deferred until a second move is actually asked for -- and
+        never paid for when it is not. The order that comes out is exactly the
+        order sorting every column up front would have produced; only the moment
+        the work happens changes.
+
+        One ply above the leaves the ranking is skipped altogether, because
+        there "searching" a child is a single call to the evaluator, which is
+        cheaper than ranking it. That one *does* change the order: it costs a
+        fifth more nodes and buys about a quarter more nodes per second, which
+        on the benchmark positions came out a wash on nine and a ply deeper on
+        the tenth.
+
+        The child positions come back with the columns because the caller needs
+        them anyway, and building every board twice was pure waste.
         """
-        columns = [c for c in MOVE_ORDER if playable & pos._landing_bit(c)]
-
         table_move = cached[3] if cached else -1
-        # Both baselines are taken from ``pos``, i.e. before the move, and both
-        # are named for whose threats they are. Getting these two the wrong way
-        # round is easy and silent: ``winning_spots`` always speaks about the
-        # side to move, so the same call means *us* on ``pos`` and *them* on a
-        # child, and subtracting one from the other compares two different
-        # players' threats. That cannot corrupt a score -- ordering only decides
-        # what alpha-beta looks at first -- but it does throw away most of the
-        # pruning the heuristic is there to buy.
+        if table_move >= 0 and playable & pos._landing_bit(table_move):
+            yield table_move, pos.played(table_move)
+
+        rest = [c for c in MOVE_ORDER if c != table_move and playable & pos._landing_bit(c)]
+        if not rest:
+            return
+        if len(rest) == 1 or depth <= _ORDER_MIN_DEPTH:
+            for col in rest:
+                yield col, pos.played(col)
+            return
+
+        # The baseline is taken from ``pos``, i.e. before the move, and is named
+        # for whose threats it holds. Getting this the wrong way round is easy
+        # and silent: ``winning_spots`` always speaks about the side to move, so
+        # the same call means *us* on ``pos`` and *them* on a child. Comparing
+        # our threats after the move against the opponent's before it -- which
+        # this did -- cannot corrupt a score, since ordering only decides what
+        # alpha-beta looks at first, but it does throw away most of the pruning
+        # the heuristic is there to buy.
         mover_threats = pos.winning_spots()
-        opponent_threats = pos.opponent_winning_spots()
-
-        def priority(col: int) -> tuple[int, int]:
-            if col == table_move:
-                return (-1, 0)
+        ranked = []
+        for col in rest:
             child = pos.played(col)
-            # In ``child`` the opponent is to move, so *their* threats are
-            # ``winning_spots`` and *ours* are ``opponent_winning_spots``.
+            # In ``child`` the opponent is to move, so *our* threats are its
+            # ``opponent_winning_spots``. More threats created is better.
+            #
+            # There is deliberately no second term for threats *conceded*: a
+            # move of ours cannot create one. The opponent's stones are
+            # untouched by it and a winning spot must be an empty cell, so the
+            # only thing our stone can do to their threat map is delete the
+            # entry it lands on. ``tests/test_bitboard.py`` pins that as an
+            # invariant. Subtracting a provably-zero count would just buy a
+            # second threat map per child on the hottest path in the search.
             created = popcount(child.opponent_winning_spots() & ~mover_threats)
-            conceded = popcount(child.winning_spots() & ~opponent_threats)
-            # More threats created is better; giving the opponent threats is
-            # worse. The second term was documented but never computed, which
-            # made every move that opens a square under an opponent four look
-            # exactly as good as one that does not.
-            return (0, conceded - created)
-
-        columns.sort(key=priority)
-        return columns
+            ranked.append((-created, col, child))
+        # Keyed on the threat count alone, so columns that create equally many
+        # threats keep their centre-out order.
+        ranked.sort(key=_threat_rank)
+        for _, col, child in ranked:
+            yield col, child
 
     def _extract_pv(self, pos: Position, first_move: int, limit: int = 8) -> list[int]:
         """Walk the transposition table to recover the expected line of play.
