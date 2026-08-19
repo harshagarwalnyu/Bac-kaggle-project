@@ -687,6 +687,45 @@ def test_undo_never_strands_the_bot_on_move(client):
     assert body["game"]["turn"] == 3 - body["game"]["bot_player"]
 
 
+def test_undo_keeps_the_bots_opening_when_that_is_all_there_is(client):
+    """The gap the test above leaves: one bot ply, and nothing of the human's.
+
+    Popping it empties the board and leaves the bot on move -- and nothing ever
+    asks the bot to play from there. The client requests a bot move after a
+    human move or a new game, never after an undo; the undo button disables
+    itself at zero plies; and a human move into the bot's turn is refused with
+    409. The game is unrecoverable except by starting another one, so undo has
+    to decline instead.
+    """
+    game_id = game_from(client, [3], bot_first=True)["game"]["id"]
+
+    body = client.post(f"/api/games/{game_id}/undo").json()
+
+    human = 3 - body["game"]["bot_player"]
+    assert body["game"]["moves"] == [3], "the bot's opening is not the human's to undo"
+    assert body["game"]["turn"] == human
+
+    # The proof that it matters: the human can still play.
+    followed = client.post(f"/api/games/{game_id}/moves", json={"column": 2})
+    assert followed.status_code == 200
+    assert followed.json()["game"]["moves"] == [3, 2]
+
+
+def test_repeated_undo_never_walks_a_bot_first_game_off_the_board(client):
+    """Undo is idempotent once the human has nothing left to take back."""
+    game_id = game_from(client, [3, 3, 4, 4], bot_first=True)["game"]["id"]
+
+    seen = []
+    for _ in range(5):
+        body = client.post(f"/api/games/{game_id}/undo").json()
+        seen.append(tuple(body["game"]["moves"]))
+        assert body["game"]["turn"] == 3 - body["game"]["bot_player"]
+
+    # The human's own last ply comes off first (the bot has not replied to it
+    # yet), then the pair below it, and then there is nothing left to give.
+    assert seen == [(3, 3, 4), (3,), (3,), (3,), (3,)], seen
+
+
 # --------------------------------------------------------------------------
 # Difficulty, when the easy move loses
 # --------------------------------------------------------------------------

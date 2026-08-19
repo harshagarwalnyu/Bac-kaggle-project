@@ -559,7 +559,8 @@ def undo(game_id: str) -> dict:
     both openings without needing to know which one this is.
 
     At least one ply always goes, otherwise "undo" on the human's own turn --
-    which is when the button is reachable -- would do nothing at all.
+    which is when the button is reachable -- would do nothing at all. The one
+    exception is a board holding no ply of the human's at all: see below.
     """
     game = app.state.store.get(game_id)
     human = 3 - game.bot_player
@@ -567,8 +568,19 @@ def undo(game_id: str) -> dict:
     # Same critical section as the move handlers: an undo racing a move would
     # otherwise pop a ply that the other thread is still deciding about.
     with game.lock:
-        if game.moves:
-            game.moves.pop()
+        # Ply i belongs to player 1 + i % 2, so "has the human moved yet" is a
+        # parity question about the plies on the board.
+        if not any(1 + i % 2 == human for i in range(len(game.moves))):
+            # An untouched game, or a bot-first game holding only the bot's
+            # opening. Popping that ply would empty the board and leave the
+            # *bot* on move, which is the one state this endpoint promises not
+            # to produce: the client only asks for a bot move after a human one
+            # or a new game, the undo button disables itself at zero plies, and
+            # a human move is then refused as out of turn -- the game is stuck
+            # until New game. Undo takes back the human's turn; there is none.
+            return _respond(game)
+
+        game.moves.pop()
         while game.moves and game.position.current_player() != human:
             game.moves.pop()
 
