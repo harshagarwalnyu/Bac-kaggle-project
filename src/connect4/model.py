@@ -302,7 +302,7 @@ def train(
     history = TrainingHistory()
     step = 0
 
-    best_snapshot = [(l.weights.copy(), l.biases.copy()) for l in model.layers]
+    best_snapshot = [(layer.weights.copy(), layer.biases.copy()) for layer in model.layers]
     epochs_without_improvement = 0
 
     for epoch in range(1, epochs + 1):
@@ -334,7 +334,7 @@ def train(
         if val_accuracy > history.best_val_accuracy:
             history.best_val_accuracy = val_accuracy
             history.best_epoch = epoch
-            best_snapshot = [(l.weights.copy(), l.biases.copy()) for l in model.layers]
+            best_snapshot = [(layer.weights.copy(), layer.biases.copy()) for layer in model.layers]
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
