@@ -260,7 +260,7 @@ input[type="range"].solver { accent-color: var(--proof); }
   width: 20px; height: 20px;
   box-sizing: border-box;
   border-radius: 50%;
-  border: 1.5px dashed currentColor;
+  border: 1.5px dashed currentcolor;
   font: 700 11px/1 var(--mono);
   vertical-align: -5px;
 }

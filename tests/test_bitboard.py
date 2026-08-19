@@ -15,6 +15,7 @@ import random
 
 import pytest
 
+from connect4 import bitboard
 from connect4.bitboard import (
     HEIGHT,
     MOVE_ORDER,
@@ -431,6 +432,39 @@ def test_playing_a_stone_forgets_the_remembered_threat_maps():
     clean = _fresh(pos)
     assert pos.winning_spots() == clean.winning_spots()
     assert pos.opponent_winning_spots() == clean.opponent_winning_spots()
+
+
+def test_a_second_ask_does_not_recompute_the_map(monkeypatch):
+    """The memo must actually memoise, not merely answer correctly.
+
+    Every other test here compares *values*, so all of them still pass if the
+    caching is deleted and each call recomputes -- the point of this PR would
+    be gone with the suite still green. This one counts the calls that reach
+    the bit twiddling instead: two maps asked twice is two computations.
+    """
+    calls = []
+    real = bitboard._winning_spots
+
+    def counted(position: int, mask: int) -> int:
+        calls.append((position, mask))
+        return real(position, mask)
+
+    monkeypatch.setattr(bitboard, "_winning_spots", counted)
+
+    pos = Position.from_moves([3, 3, 4])
+    calls.clear()  # building the board asks its own questions; start from zero.
+
+    for _ in range(3):
+        pos.winning_spots()
+        pos.opponent_winning_spots()
+    assert len(calls) == 2, calls
+
+    # ...and the memo is dropped the moment the board moves on.
+    pos.play(2)
+    calls.clear()
+    pos.winning_spots()
+    pos.opponent_winning_spots()
+    assert len(calls) == 2, calls
 
 
 def test_a_remembered_map_does_not_change_what_a_position_is():
