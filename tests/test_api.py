@@ -19,6 +19,8 @@ tests would have caught a wrong evaluator being wired in.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -26,11 +28,14 @@ from connect4.api import (
     HUMAN,
     MAX_GAMES,
     SOLVER_SKILL,
+    TIME_LIMIT_S,
     AnalysisCache,
     Store,
+    Warmer,
     app,
 )
 from connect4.bitboard import HEIGHT, WIDTH, Position
+from connect4.engine import Engine
 from connect4.history import GameHistory
 
 
@@ -43,6 +48,11 @@ def client():
         # test that asserts on history must not inherit yesterday's games.
         # Swapping in a pathless history gives both: same code, no disk.
         app.state.history = GameHistory(None)
+        # And the warmer is off, because a background thread quietly filling
+        # the analysis cache would make every count of searches in this file
+        # depend on how fast the machine happened to be. The tests that are
+        # *about* warming turn it back on and wait for it explicitly.
+        app.state.warmer.disable()
         yield test_client
 
 
@@ -585,7 +595,7 @@ def test_a_turn_searches_each_position_once(client, monkeypatch):
     cost of a turn. This test fails if anyone reaches past ``_analyse`` to the
     engine again.
     """
-    app.state.analysis_cache = AnalysisCache()
+    app.state.analysis_cache.clear()
     searched: list[int] = []
     engine = app.state.engine
     search = engine.analyse
@@ -626,3 +636,102 @@ def test_solver_and_ordinary_analyses_of_one_position_do_not_collide():
     cache.put((7, True), "deep")
     assert cache.get((7, False)) == "quick"
     assert cache.get((7, True)) == "deep"
+
+
+# --------------------------------------------------------------------------
+# Thinking ahead
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def warming():
+    """The app with its background thinking switched back on.
+
+    Two adjustments make this fast enough to be a test rather than a wait: the
+    cache starts empty, so nothing here can pass on work an earlier test paid
+    for, and the background engine gets a fifth of a second per position instead
+    of a full one. The budget is not what is under test; the plumbing is.
+    """
+    warmer = app.state.warmer
+    app.state.analysis_cache.clear()
+    warmer.engine.time_limit_s = 0.2
+    warmer.enabled = True
+    try:
+        yield warmer
+    finally:
+        warmer.disable()
+        warmer.engine.time_limit_s = TIME_LIMIT_S
+        app.state.analysis_cache.clear()
+
+
+def test_waiting_for_the_human_is_spent_analysing_their_replies(client, warming):
+    new_game(client)
+    assert warming.wait_idle(timeout=30.0), "the warmer never emptied its queue"
+
+    # Every column the human could play from the empty board is now a position
+    # the server has already thought about.
+    empty = Position()
+    for column in empty.legal_moves():
+        key = (empty.played(column).key(), False)
+        assert app.state.analysis_cache.peek(key) is not None, f"column {column} left cold"
+
+
+def test_a_warmed_move_costs_no_search_at_all(client, warming):
+    game_id = new_game(client)["game"]["id"]
+    assert warming.wait_idle(timeout=30.0)
+
+    searched: list[int] = []
+    engine = app.state.engine
+    search = engine.analyse
+
+    def counting(pos):
+        searched.append(pos.key())
+        return search(pos)
+
+    engine.analyse = counting
+    try:
+        body = play(client, game_id, 3)
+    finally:
+        del engine.analyse
+
+    assert body["analysis"] is not None, "the response still carries a full analysis"
+    assert searched == [], "the human's move re-searched a position already warmed"
+
+
+def test_solver_games_are_never_warmed(client, warming):
+    # The solver keeps its transposition table between searches, so what it can
+    # prove depends on what it was asked before -- a background answer would not
+    # be the answer a request would have got.
+    before = warming.warmed
+    new_game(client, skill=SOLVER_SKILL)
+    assert warming.wait_idle(timeout=10.0)
+    assert warming.warmed == before
+
+
+def test_an_interrupted_search_is_never_cached():
+    # Aborting mid-search leaves the engine holding whatever depth it finished,
+    # which is shallower than the request path would have produced. Storing that
+    # would make a cache hit worse than a cache miss.
+    position = Position.from_moves([3, 3, 4])
+    cache = AnalysisCache()
+    warmer = Warmer(engine=Engine(time_limit_s=30.0), cache=cache, enabled=True)
+    try:
+        warmer.schedule([position])
+        time.sleep(0.2)
+        warmer.suspend()
+        assert warmer.wait_idle(timeout=10.0), "the worker did not stop"
+        assert warmer.warmed == 0
+        assert cache.peek((position.key(), False)) is None
+    finally:
+        warmer.close()
+
+
+def test_a_disabled_warmer_ignores_work(client):
+    # The default in this suite, asserted rather than assumed: nothing in the
+    # request path may switch background thinking back on.
+    warmer = app.state.warmer
+    assert warmer.enabled is False
+    before = warmer.warmed
+    warmer.schedule([Position.from_moves([0])])
+    assert warmer.wait_idle(timeout=5.0)
+    assert warmer.warmed == before

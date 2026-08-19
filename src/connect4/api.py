@@ -21,8 +21,10 @@ on screen -- the analysis is attached to the position it describes.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +54,10 @@ MAX_GAMES = 200
 # seconds of visible deliberation, a test suite wants none of it.
 TIME_LIMIT_S = float(os.environ.get("CONNECT4_TIME_LIMIT", "1.0"))
 MAX_DEPTH = int(os.environ.get("CONNECT4_MAX_DEPTH", str(MAX_PLIES)))
+
+# Whether the server thinks ahead while it is waiting for the human. Off is
+# a supported way to run -- it costs a second a turn and buys back a core.
+WARM_AHEAD = os.environ.get("CONNECT4_WARM", "1") != "0"
 
 # Skill 6 is a separate mode, not another notch on the same dial, and it gets
 # its own engine because the difference is the *budget*, not the move choice.
@@ -286,7 +292,27 @@ async def lifespan(app: FastAPI):
     app.state.store = Store()
     app.state.history = GameHistory(HISTORY_PATH)
     app.state.analysis_cache = AnalysisCache()
-    yield
+
+    # A third engine, configured exactly like the one the request path uses,
+    # so that an answer it computes in the background is the same answer --
+    # not a cheaper one. It needs its own instance because a search mutates
+    # the engine it runs on.
+    app.state.warmer = Warmer(
+        engine=Engine(
+            evaluator=heuristic_evaluator,
+            max_depth=MAX_DEPTH,
+            time_limit_s=TIME_LIMIT_S,
+        ),
+        cache=app.state.analysis_cache,
+        enabled=WARM_AHEAD,
+    )
+    try:
+        yield
+    finally:
+        # A daemon thread would not hold the process open, but it would keep
+        # burning a core through the shutdown of a test suite that starts the
+        # app a few hundred times.
+        app.state.warmer.close()
 
 
 app = FastAPI(title="Connect 4 glass-box bot", lifespan=lifespan)
@@ -319,6 +345,21 @@ class AnalysisCache:
         self.hits = 0
         self.misses = 0
 
+    def clear(self) -> None:
+        """Forget everything. Used by tests that count searches; keeping the
+        same object matters, because the warmer holds a reference to it and a
+        replacement instance would leave the two writing to different dicts."""
+        self._entries.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def peek(self, key: tuple[int, bool]) -> Analysis | None:
+        """Look without counting.
+
+        The background thread asks whether a position is already known, and
+        its curiosity is nobody's cache hit."""
+        return self._entries.get(key)
+
     def get(self, key: tuple[int, bool]) -> Analysis | None:
         found = self._entries.get(key)
         if found is None:
@@ -337,6 +378,147 @@ class AnalysisCache:
             entries.pop(next(iter(entries)), None)
 
 
+class Warmer:
+    """Thinks about the human's likely replies while the human is thinking.
+
+    A turn costs two searches and neither can be dropped: one chooses the bot's
+    move, the other describes the position that move leaves you in, and the
+    second one *is* the analysis panel. What can change is *when* they happen.
+    Between the bot's reply landing and the human's next stone there are several
+    seconds in which the server does nothing at all.
+
+    So it fills them. Given the position the human is about to move from, it
+    analyses the positions the human could create -- best first, according to
+    the analysis the panel is already showing, because people mostly play
+    reasonable moves -- and drops each result into the same cache the request
+    path reads. When the human finally plays, that search has already happened
+    and their move comes back immediately.
+
+    Three rules keep this honest rather than merely fast:
+
+    * It uses its own engine, configured identically to the request path's --
+      same budget, same evaluator, same table policy -- so a warmed answer is
+      the answer a request would have got, not a cheaper one. (As with any
+      timed search the depth reached can land a ply either side; what cannot
+      happen is a deliberately shallower search being passed off as a full
+      one.) A search mutates the engine it runs on, which is why this cannot
+      share an instance.
+    * An interrupted search is thrown away. When a request arrives the job is
+      aborted -- by moving its deadline into the past, which the search already
+      checks every 2048 nodes -- and its result is dropped rather than stored,
+      so the cache can never hold an analysis cut shorter than the one a request
+      would have produced. The bookkeeping is a generation counter rather than
+      the search's own ``aborted`` flag, because that flag is also set by a
+      search that simply used up its clock, which is the ordinary outcome and
+      exactly what the request path returns too.
+    * Solver mode is never warmed. That engine deliberately keeps its
+      transposition table between searches, so what it can prove depends on what
+      it has already been asked -- exactly the property that would make a
+      background answer differ from a foreground one.
+
+    One thread, not a pool. Two would double the background throughput and halve
+    the foreground's, because the search is pure Python and holds the GIL; the
+    thing being optimised here is the human's wait, not the CPU's utilisation.
+    """
+
+    def __init__(self, engine: Engine, cache: AnalysisCache, enabled: bool = True) -> None:
+        # Public because the thing worth inspecting from outside is exactly
+        # this: which engine, and with what budget, produced a warmed answer.
+        self.engine = engine
+        self._cache = cache
+        self.enabled = enabled
+        self.warmed = 0
+        self._jobs: list[Position] = []
+        self._generation = 0
+        self._lock = threading.Lock()
+        self._work = threading.Event()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="warmer", daemon=True)
+        self._thread.start()
+
+    # -------------------------------------------------------------- control
+
+    def suspend(self) -> None:
+        """Stop thinking, now. Called before the request path starts a search.
+
+        Cheap enough to call on every request, including the ones that hit the
+        cache and never search at all.
+        """
+        with self._lock:
+            self._jobs.clear()
+            self._generation += 1
+        self.engine.abort()
+
+    def schedule(self, positions: Iterable[Position]) -> None:
+        """Queue what to think about next, replacing whatever was queued."""
+        if not self.enabled:
+            return
+        queued = list(positions)
+        with self._lock:
+            self._jobs = queued
+            self._generation += 1
+            # Under the same lock the worker uses to declare itself idle, so a
+            # caller that schedules and then waits cannot be told "finished"
+            # about the batch before this one.
+            if queued:
+                self._idle.clear()
+        if queued:
+            self._work.set()
+
+    def disable(self) -> None:
+        """Turn it off and stop anything in flight.
+
+        The test suite runs with the warmer off: a test that counts searches is
+        measuring the request path, and a helpful background thread filling the
+        cache underneath it would make that count depend on timing.
+        """
+        self.enabled = False
+        self.suspend()
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        """Block until the queue is empty. For tests; nothing in the app waits."""
+        return self._idle.wait(timeout)
+
+    def close(self) -> None:
+        self._closed = True
+        self.suspend()
+        self._work.set()
+        self._thread.join(timeout=2.0)
+
+    # --------------------------------------------------------------- worker
+
+    def _run(self) -> None:
+        while not self._closed:
+            self._work.wait()
+            self._work.clear()
+            while not self._closed:
+                with self._lock:
+                    if not self._jobs:
+                        self._idle.set()
+                        break
+                    position = self._jobs.pop(0)
+                    generation = self._generation
+                self._warm(position, generation)
+
+    def _warm(self, position: Position, generation: int) -> None:
+        key = (position.key(), False)
+        if self._cache.peek(key) is not None:
+            return
+        analysis = self.engine.analyse(position)
+        with self._lock:
+            # Anything that happened while this was running -- an abort, a
+            # fresh schedule, a shutdown -- bumped the generation, and means
+            # the result is either cut short or about a game nobody is
+            # playing any more. A search that merely ran out of its own clock
+            # is not cut short: that is what the request path produces too.
+            if generation != self._generation:
+                return
+            self._cache.put(key, analysis)
+            self.warmed += 1
+
+
 def _engine_for(skill: int) -> Engine:
     """Solver mode gets the long-budget engine; every other skill gets the
     normal one. Difficulty below 5 is chosen from the *same* honest analysis,
@@ -351,6 +533,11 @@ def _analyse(pos: Position, skill: int) -> Analysis:
     engines have different budgets and would answer differently about the same
     board.
     """
+    # Whatever the background thread is chewing on, this request matters
+    # more: the search is pure Python, so a second one running alongside it
+    # would hold the GIL half the time and double the wait being measured.
+    app.state.warmer.suspend()
+
     key = (pos.key(), skill >= SOLVER_SKILL)
     cached = app.state.analysis_cache.get(key)
     if cached is not None:
@@ -394,11 +581,43 @@ def _respond(game: Game, **extra) -> dict:
     rather than a line four handlers have to remember to copy.
     """
     _archive(game)
-    return {
+    payload = {
         "game": describe_game(game),
         "analysis": _analysis_payload(game.position, game.skill),
         **extra,
     }
+    # Only now, with the answer in hand, is the server free to think ahead.
+    _schedule_warmup(game)
+    return payload
+
+
+def _schedule_warmup(game: Game) -> None:
+    """Queue the positions the *next* request is going to ask about.
+
+    Only while the human is the one being waited on. When it is the bot's turn
+    the client is already asking for the move, so there is no idle time to use
+    and a background search would only compete with the real one.
+
+    The ordering is free: the analysis this response carries ranks the moves of
+    whoever is to move, and that is the human, so its own best-first list is
+    also the order in which their replies are worth precomputing.
+    """
+    position = game.position
+    if (
+        game.skill >= SOLVER_SKILL
+        or position.current_player() == game.bot_player
+        or position.has_won()
+        or position.is_draw()
+    ):
+        return
+
+    known = app.state.analysis_cache.peek((position.key(), False))
+    columns = (
+        [evaluation.column for evaluation in known.evaluations]
+        if known
+        else position.legal_moves()
+    )
+    app.state.warmer.schedule(position.played(column) for column in columns)
 
 
 class _NullEvaluator:

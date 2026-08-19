@@ -417,6 +417,12 @@ Two design decisions are stated at the top of the file — quote them:
   second time, and therefore **cannot** render an opinion about a different
   position than the one on screen — the analysis is attached to the position it
   describes.
+- **A turn is two searches, and one of them happens while you are thinking.**
+  Choosing the bot's move and describing the position it creates are both
+  searches; the second one is the analysis panel. Caching the analysis per
+  position removed a duplicate search (3.13s -> 2.05s a turn), and analysing
+  your likely replies while the board waits for you removed most of what was
+  left (**2.05s -> 1.13s**). Section 6 has the numbers and the caveats.
 - `legal_moves` is **sorted** on the wire even though the engine produces it
   centre-first: that ordering is a *search optimisation* and has no business
   leaking into the wire format.
@@ -456,6 +462,20 @@ burying the game.
   for one side. A double-click on a column is enough to do it. Fixed with one
   lock per game, so unrelated games never wait on each other. The test fires six
   simultaneous requests through a barrier and asserts **exactly one** 200.
+- **Latency was measured, not tuned by feel.** A turn costs two searches --
+  one to choose the bot's move, one to describe the position it creates, which
+  is the analysis panel. Timed end to end against a running server: a search
+  per request **3.13s**, memoising the analysis per position **2.05s** (the
+  same position was being searched twice a turn), and analysing the human's
+  likely replies while the board waits for them **1.13s**. In a browser, click
+  to the bot's stone: 1.18-1.30s cold, 0.14-0.22s on a familiar opening.
+  - **The caveats belong in the same breath as the numbers.** Someone who
+    clicks instantly gains nothing and pays ~4% for background work that is
+    discarded; a game in progress keeps a second core busy; `CONNECT4_WARM=0`
+    turns it off. The cache is only sound because `analyse` clears its table
+    each call, so an analysis is a pure function of the position -- and solver
+    mode, which deliberately *keeps* its table, is excluded from warming for
+    exactly that reason.
 - **Bounded memory.** Games live in a dict with a capacity and oldest-first
   eviction. A database would be ceremony around a dict for a local app, but
   memory is still finite.

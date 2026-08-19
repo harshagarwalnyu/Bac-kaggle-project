@@ -152,6 +152,44 @@ saying plainly that the dataset network is out of the driving seat here. Claimin
 a solve we did not compute would be the one dishonest thing this project could
 ship.
 
+## What a move costs
+
+A turn is two searches and neither is optional: one picks the bot's reply, the
+other describes the position that reply leaves you in -- and that second one *is*
+the analysis panel. What the server gets to choose is *when* they happen.
+
+Measured against a freshly started server at the default one-second budget, mean
+over the turns played:
+
+| | your move | bot's reply | turn |
+|---|---|---|---|
+| a search per request | 1.06s | 2.08s | **3.13s** |
+| analysis memoised per position | 1.02s | 1.03s | **2.05s** |
+| plus thinking while you decide | 0.05s | 1.07s | **1.13s** |
+
+The first row wasted an entire search per turn. Playing a stone analysed the
+position it created, and a moment later the bot analysed that same position again
+to choose its move -- the identical search, twice. `AnalysisCache` makes the
+second one a lookup. It is sound because `analyse` clears its transposition table
+on every call, which makes an analysis a pure function of the position rather
+than of the searches that came before it.
+
+The third row is the `Warmer`. Between the bot's reply and your next stone the
+server has nothing to do, so it analyses the positions you could create -- best
+first, in the order the panel is already showing you. It runs on its own engine
+with the same budget and the same evaluator, so a warmed answer is the answer a
+request would have got; a search interrupted by an arriving request is thrown
+away rather than stored, so a cache hit can never be thinner than a miss. Solver
+mode is never warmed, because that engine keeps its table between searches and
+what it can prove therefore depends on what it was asked before.
+
+The costs, stated plainly. Someone who clicks the instant the bot moves gains
+nothing and pays about 4% (2.14s against 2.05s) for background work that gets
+discarded, and a game in progress keeps a second core busy for a few seconds a
+turn; `CONNECT4_WARM=0` turns it off. Measured in a real browser, from the click
+to the bot's stone appearing: **1.18-1.30s** on a cold server, **0.14-0.22s**
+once an opening has been seen before.
+
 ## Past games
 
 Finished games are appended to `data/games.jsonl` and shown under the History tab,
@@ -184,7 +222,7 @@ src/connect4/
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          256 tests
+tests/          264 tests
 ```
 
 ### Configuration
@@ -198,6 +236,7 @@ differently:
 | `CONNECT4_TIME_LIMIT` | `1.0` | search budget per move, seconds |
 | `CONNECT4_SOLVER_TIME_LIMIT` | `12.0` | budget in solver mode |
 | `CONNECT4_HISTORY` | `data/games.jsonl` | where the game archive is written |
+| `CONNECT4_WARM` | `1` | think ahead while waiting for the human; `0` turns it off |
 
 `CONNECT4_HISTORY` has three states, not two: unset uses the default file, a
 path writes there, and an **empty** value keeps games in memory only and never
@@ -236,7 +275,7 @@ entirely. Accuracy alone would have hidden that completely.
 
 ```bash
 uv sync
-uv run python -m pytest              # 256 tests
+uv run python -m pytest              # 264 tests
 uv run python -m scripts.train       # downloads the data, trains, prints baselines
 uv run python -m scripts.validate    # the three experiments above
 uv run python -m connect4.api        # play

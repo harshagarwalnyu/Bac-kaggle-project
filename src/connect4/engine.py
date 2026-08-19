@@ -223,6 +223,18 @@ class Engine:
             stats=self._stats,
         )
 
+    def abort(self) -> None:
+        """Ask a search running on another thread to stop at its next check.
+
+        The deadline is already consulted every 2048 nodes, so moving it into
+        the past ends the search in a fraction of a millisecond without adding
+        a second flag to the hot path. Only meaningful for an engine some
+        background thread owns -- see ``Warmer`` in the API. The search comes
+        back with ``stats.aborted`` set, which is the caller's cue to throw the
+        partial answer away rather than believe it.
+        """
+        self._deadline = 0.0
+
     def choose_move(self, pos: Position, skill: int = 5) -> int:
         """Pick a move at a given strength, 0 (weakest) to 5 (full strength).
 
