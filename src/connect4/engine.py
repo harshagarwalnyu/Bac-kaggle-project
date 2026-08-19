@@ -19,7 +19,7 @@ any given answer:
 *Heuristic.*  When the depth limit is hit first, the leaf is scored by an
               evaluator instead. That evaluator is the pluggable seam of this
               project -- it can be the hand-written threat heuristic, or the
-              neural network trained on the Kaggle dataset. Same search, two
+              neural network trained on the UCI dataset. Same search, two
               different brains, directly comparable.
 
 Every score carries a flag saying which regime produced it, and the UI shows

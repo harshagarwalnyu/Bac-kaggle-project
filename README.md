@@ -1,8 +1,10 @@
 # Connect 4 — a glass-box bot
 
 A Connect 4 bot you can play in the browser, built on the
-[UCI/Kaggle connect-4 dataset](https://www.kaggle.com/datasets/tbrewer/connect-4)
-(67,557 solved 8-ply positions).
+[UCI `connect-4` opening database](https://archive.ics.uci.edu/dataset/26/connect+4)
+(67,557 legal 8-ply positions, each labelled with its perfect-play outcome by John
+Tromp's solver). See [which dataset, and why](#which-connect-4-dataset-and-why) --
+there are two very different files under this name.
 
 The twist: **two brains publish an opinion on every single move, and the UI shows
 both.** A bitboard alpha-beta search that sometimes returns *proofs* ("loss in 6"),
@@ -33,6 +35,39 @@ So the dataset does two honest jobs instead:
    is a luxury you almost never get.
 
 And the search is what actually plays.
+
+### Which connect-4 dataset, and why
+
+Two well-known datasets share the name, and they are not interchangeable:
+
+| | UCI `connect-4` (**used here**) | Kaggle "Connect-4 Game Dataset" |
+|---|---|---|
+| rows | 67,557 | 376,641 |
+| a row is | one **position**, at exactly 8 plies | one **finished game**'s final board |
+| cell order | column-major, bottom-up (`a1..a6, b1..b6`) | left-to-right, top-to-bottom |
+| encoding | `x` / `o` / `b` | `1` / `-1` / `0` |
+| label | perfect-play outcome from **Tromp's solver** | who actually won that game |
+| labels produced by | an exact solver | self-play *while a network was being trained* |
+
+The label column is the whole reason for the choice. This project's premise is
+grading a bot's verdicts against **truth**, and only one of these files contains
+truth: UCI's labels are game-theoretic values, so a disagreement between my search
+and the label is unambiguously my search being wrong. The Kaggle file's labels are
+the observed results of games between two weak, still-learning agents, so a
+disagreement means nothing in particular.
+
+Two further problems with the Kaggle file for *this* design. Its rows are **final**
+boards, and a finished board is terminal -- exactly the node type a search scores
+exactly and never asks an evaluator about, so it is close to useless as leaf
+training data. And predicting the winner from a final board is near-trivial, because
+the winning four-in-a-row is sitting right there in the input: a model can score
+very well on it while learning nothing about evaluating a live position.
+
+The honest cost of the choice is the one the measurements below expose: UCI is
+**single-depth**, so the network never sees an opening or an endgame, and that is
+precisely why it fails off-distribution. The Kaggle file has the opposite trade --
+far more coverage, far weaker labels. Fixing this properly means neither file: it
+means solver-labelled positions sampled across *many* depths.
 
 ## What the measurements said — including the inconvenient part
 
@@ -207,4 +242,4 @@ uv run python -m scripts.validate    # the three experiments above
 uv run python -m connect4.api        # play
 ```
 
-The dataset is fetched from the UCI mirror on first run; no Kaggle credentials needed.
+The dataset is fetched from the UCI archive on first run; nothing needs a Kaggle account.

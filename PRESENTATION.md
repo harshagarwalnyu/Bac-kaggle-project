@@ -31,7 +31,7 @@ killed the obvious approach, and what replaced it.
 | board | bitboards (plain Python ints) | A 6x7 list-of-lists needs dozens of comparisons per node to check a win; the bitboard needs 4 shift-and-mask ops. That is the difference between thousands and hundreds of thousands of nodes per second. |
 | search | negamax + alpha-beta, transposition table, iterative deepening | Hand-written, no game library. |
 | ML | **NumPy only** — no PyTorch, TensorFlow or scikit-learn | The deliverable was being able to defend every line. Forward pass, backprop, Adam with bias correction, He init, early stopping — all hand-written and gradient-checked. |
-| data | UCI / Kaggle `connect-4`, 67,557 rows | Downloaded automatically on first run from the UCI mirror. No Kaggle credentials needed. |
+| data | **UCI `connect-4` opening database**, 67,557 rows | Downloaded automatically on first run from the UCI archive. Not the 376k-row Kaggle file of a similar name — see section 2. |
 | API | FastAPI + Pydantic | Handlers are sync; validation lives in the request models, so a bad column is a 422 and never an IndexError deeper down. |
 | UI | **vanilla HTML/CSS/JS** — no React, no build step, no CDN | The DOM is a pure function of one state object. The whole install is one command. |
 | storage | append-only JSONL | Not SQLite — see section 6. |
@@ -53,6 +53,83 @@ fails without the fix. That is a better answer than "no", and it is true.
 ## 2. The dataset — explain it exactly like this
 
 This is the part most people get wrong, so be precise here.
+
+### Vocabulary — define these three words before you use them
+
+**Ply = one single move by one player.** One stone dropped. It is *not* a
+"move" in the everyday sense of "I go, then you go" — that would be two plies.
+So the ply count of a board is just **how many stones are on it**.
+
+**The board is 7 columns x 6 rows = 42 cells.** So a game that fills the board
+completely is **42 plies** long. 42 is the maximum a Connect 4 game can be; most
+end sooner because somebody connects four.
+
+Putting those together, "ply *n*" and "*n* stones on the board" are the same
+statement:
+
+```
+ply 0    board empty                    .......   game start
+ply 8    8 stones,  4 each     ~19% full  ##.....   <-- EVERY row of my dataset
+ply 15   15 stones             ~36% full  ####...
+ply 30   30 stones             ~71% full  ######.   late midgame
+ply 42   42 stones            100% full  #######   board full = draw
+```
+
+**Why 8 plies means "4 each", and why that matters.** Players alternate starting
+with `x`, so after an even number of stones both have played the same number: 8
+plies = 4 `x` + 4 `o`, and it is **`x`'s turn again**. That is why every label in
+the file is from `x`'s point of view *and* from the point of view of the player
+about to move — the two coincide, so no sign flip is ever needed in my code.
+
+**And why "ply 30" keeps coming up.** A search looks *ahead*. If the bot is
+standing on a ply-8 board and searches 7 moves deep, the boards at the bottom of
+its search tree — the **leaves**, the ones it actually hands to the evaluator —
+are ply-15 boards. Later in a real game, standing at ply 23 and searching 7 deep,
+the leaves are ply-30 boards. **The evaluator is never asked about the board you
+are looking at. It is asked about boards several moves into the future.** My
+network only ever saw ply-8 boards in training, so from the very first move it is
+being asked about positions unlike anything in its training set. That single fact
+is the explanation for the whole result in section 3.
+
+### Say this first: there are two datasets called "connect-4"
+
+Get in front of it, because if someone Googles "Kaggle connect 4 dataset" mid-talk
+they will land on the *other* one and think your numbers are wrong.
+
+| | UCI `connect-4` — **the one I used** | Kaggle "Connect-4 Game Dataset" |
+|---|---|---|
+| rows | **67,557** | **376,641** |
+| a row is | one **position**, at exactly 8 plies | one **finished game**'s final board |
+| cell order | column-major bottom-up (`a1..a6, b1..b6`) | left-to-right, top-to-bottom |
+| encoding | `x` / `o` / `b` | `1` / `-1` / `0` |
+| label | perfect-play outcome, from **Tromp's solver** | who actually won that game |
+| labels came from | an exact solver | self-play *while a network was still training* |
+
+**Why I picked the smaller one — three reasons, say them in this order:**
+
+1. **The label is the entire point.** This project grades a bot's verdicts against
+   **truth**. UCI's labels are game-theoretic values, so when my search disagrees
+   with a label, my search is unambiguously wrong. The Kaggle file's labels are the
+   results of games between two weak, still-learning agents — a disagreement there
+   tells you nothing.
+2. **Its rows are *final* boards.** A finished board is terminal, and terminal is
+   exactly the node a search scores exactly and never asks an evaluator about. So
+   it is close to useless as leaf-evaluator training data. To use it you would have
+   to reconstruct the intermediate positions, and the file does not contain the
+   move order — only the final grid.
+3. **The task on it is near-trivial.** The winning four-in-a-row is sitting right
+   there in the input. A model can score very well on that while learning nothing
+   about evaluating a *live* position.
+
+**Then volunteer the cost, before they find it** — this is the strongest thing you
+can do here: "The price of that choice is that UCI is **single-depth**. My network
+never sees an opening or an endgame, and that is precisely why it fails
+off-distribution in table B. The Kaggle file has the opposite trade: far more
+coverage, far weaker labels. The real fix is neither file — it is solver-labelled
+positions sampled across many depths, which is exactly what I said I'd do next."
+
+That turns a gotcha into evidence you understood the trade-off rather than
+stumbled into it.
 
 ### What the file actually contains
 
@@ -423,6 +500,15 @@ useful: the labels are perfect-play ground truth, so I can grade against truth
 instead of against a proxy. And I explicitly do **not** claim a solve from the
 empty board; the UI only lights `proven` where the search genuinely resolved the
 line.
+
+**"The Kaggle connect-4 dataset has 370,000 rows — why do you say 67,557?"**
+Because those are two different files. The one on Kaggle under that name is the
+"Connect-4 Game Dataset": 376,641 rows, one per finished game, cells left-to-right
+top-to-bottom as 1/-1/0, labelled with who actually won a self-play game. I used
+the UCI `connect-4` opening database — 67,557 positions at exactly 8 plies, labelled
+with the **perfect-play** outcome by Tromp's solver. I need solver labels, because
+grading against ground truth is the whole premise. See the table in section 2 for
+the full comparison, and the cost of that choice.
 
 **"How do you know the labels are right?"**
 They are Tromp's solver output, and independently my own search agrees with them

@@ -1,4 +1,4 @@
-"""Loading and feature-encoding the UCI / Kaggle ``connect-4`` dataset.
+"""Loading and feature-encoding the UCI ``connect-4`` opening database.
 
 What this dataset actually is
 -----------------------------
@@ -25,6 +25,16 @@ wrong:
    therefore always from the point of view of the player to move -- the same
    convention the search engine uses internally. No sign flip is needed
    anywhere, which removes the single most likely source of a silent bug.
+
+Not to be confused with the other file
+--------------------------------------
+Kaggle also hosts a "Connect-4 Game Dataset" -- 376,641 rows, one per *finished
+game*, cells ordered left-to-right top-to-bottom as ``1``/``-1``/``0``, labelled
+with who actually won. It is a different file with a different shape and a much
+weaker label: those winners are the outcomes of self-play by a network that was
+still learning, whereas the labels here are exact. This module reads the UCI file
+only, and ``ensure_raw_data`` downloads it from the UCI archive, so the two can
+never be mixed up at runtime.
 
 Feature design
 --------------
