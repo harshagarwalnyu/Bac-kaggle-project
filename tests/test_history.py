@@ -58,6 +58,41 @@ def test_recording_the_same_game_twice_is_a_no_op():
     assert second is first
 
 
+def test_a_replayed_ending_replaces_the_abandoned_one():
+    """Idempotence on the id alone is too strong.
+
+    A player can undo out of a finished game and play it to a different
+    ending, and that game keeps its id. Keyed on the id only, the archive would
+    keep insisting the bot had won a game the player went on to win.
+    """
+    history = GameHistory(None)
+    add(history, "a", moves=[0, 1, 0, 1, 0, 1, 0], winner=1)
+    replayed = add(history, "a", moves=[0, 1, 0, 1, 0, 1, 2, 1], winner=2)
+
+    assert len(history) == 1
+    assert history.get("a") is replayed
+    assert history.get("a").winner == 2
+    assert history.get("a").outcome == "bot won"
+
+
+def test_a_replayed_ending_survives_a_restart(tmp_path):
+    """The file stays append-only, so the superseded line is still on disk.
+
+    Loading newest-first is what makes that harmless: the later line is the one
+    that is still true, and it is the one met first.
+    """
+    path = tmp_path / "games.jsonl"
+    history = GameHistory(path)
+    add(history, "a", moves=[0, 1, 0, 1, 0, 1, 0], winner=1)
+    add(history, "a", moves=[0, 1, 0, 1, 0, 1, 2, 1], winner=2)
+
+    assert len(path.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+    reloaded = GameHistory(path)
+    assert len(reloaded) == 1, "the superseded line came back as a second game"
+    assert reloaded.get("a").winner == 2
+
+
 def test_the_record_does_not_alias_the_caller_s_move_list():
     """The API hands over the live game's move list; undo mutates it."""
     history = GameHistory(None)

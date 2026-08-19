@@ -26,10 +26,13 @@ kept in sync by only ever appending through :meth:`GameHistory.record`.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # Newest-first, bounded. A demo does not need the 5000th game back, and an
 # unbounded list in a long-running process is just a slow leak.
@@ -129,15 +132,24 @@ class GameHistory:
         skill: int,
         started: float,
     ) -> GameRecord:
-        """Store a finished game. Idempotent by id.
+        """Store a finished game. Idempotent by id *and* move list.
 
         Idempotence matters because a finished game can be re-described more
         than once -- the client is free to GET a game after it ended, and that
         must not append a duplicate line every time.
+
+        Idempotence on the id alone is too strong, though. A player can undo out
+        of a finished game and play it to a different ending, and that game
+        keeps its id. Keying on the moves as well means the replayed ending
+        replaces the abandoned one instead of being silently discarded, which is
+        what happened before: the archive would insist the bot had won a game
+        the player went on to win.
         """
         existing = self.get(game_id)
         if existing is not None:
-            return existing
+            if existing.moves == list(moves):
+                return existing
+            self._forget(game_id)
 
         record = GameRecord(
             id=game_id,
@@ -152,6 +164,20 @@ class GameHistory:
         self._games.appendleft(record)
         self._append_to_disk(record)
         return record
+
+    def _forget(self, game_id: str) -> None:
+        """Drop a game from memory only.
+
+        The file stays append-only on purpose. Rewriting it to delete a line
+        would put every game already written at risk to correct one of them,
+        which is the exact trade this format exists to avoid. The superseded
+        line is harmless because it is *earlier* in the file than its
+        replacement, and :meth:`_load` keeps the last line for any given id.
+        """
+        for record in self._games:
+            if record.id == game_id:
+                self._games.remove(record)
+                return
 
     def clear(self) -> None:
         """Forget everything, on disk too. The user asked; do it completely
@@ -174,8 +200,11 @@ class GameHistory:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(record.to_json() + "\n")
-        except OSError:
-            pass
+        except OSError as error:
+            # Swallowed, but not silently: a full disk that quietly stops
+            # archiving looks identical to a working archive until the day
+            # someone restarts and finds nothing there.
+            _log.warning("could not append game %s to %s: %s", record.id, self.path, error)
 
     def _load(self) -> None:
         assert self.path is not None
@@ -183,19 +212,35 @@ class GameHistory:
             return
         try:
             lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except OSError as error:
+            # An unreadable archive must not stop the server from starting, but
+            # "no games yet" and "your games are there and I cannot see them"
+            # are very different things and should not look the same.
+            _log.warning("could not read game history from %s: %s", self.path, error)
             return
 
         # The file is oldest-first; the deque is newest-first. Taking the tail
         # before reversing means a huge file costs one pass, not `limit`
         # pointless appendlefts that immediately fall off the end.
-        for line in reversed(lines[-self.limit:]):
+        #
+        # Reading newest-first also makes de-duplication fall out for free: an
+        # id can legitimately appear twice when a finished game was undone and
+        # replayed, and the entry we meet first is the later line, which is the
+        # one that is still true.
+        seen: set[str] = set()
+        for line in reversed(lines):
+            if len(self._games) >= self.limit:
+                break
             line = line.strip()
             if not line:
                 continue
             try:
-                self._games.append(GameRecord.from_dict(json.loads(line)))
+                record = GameRecord.from_dict(json.loads(line))
             except (json.JSONDecodeError, TypeError, ValueError):
                 # A half-written final line from a crash. Skipping it is the
                 # whole reason this format was chosen.
                 continue
+            if record.id in seen:
+                continue
+            seen.add(record.id)
+            self._games.append(record)
