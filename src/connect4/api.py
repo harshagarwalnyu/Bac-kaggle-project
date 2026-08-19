@@ -342,6 +342,17 @@ class AnalysisCache:
     def __init__(self, capacity: int = 512) -> None:
         self._entries: dict[tuple[int, bool], Analysis] = {}
         self._capacity = capacity
+        # The warmer writes from its own thread while requests read and write
+        # from FastAPI's threadpool, so every method here is called
+        # concurrently. Storing one value is atomic on its own, but eviction is
+        # two steps -- name the oldest key, then drop it -- and
+        # ``next(iter(entries))`` raises RuntimeError("dictionary changed size
+        # during iteration") if another thread inserts between them. The
+        # counters have the same problem more quietly: ``+= 1`` is a read and a
+        # write, so a racing pair loses a count and the tests that assert on
+        # searches-per-turn start flickering. Holding this is free -- every
+        # critical section below is a dict lookup, never a search.
+        self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
 
@@ -349,33 +360,37 @@ class AnalysisCache:
         """Forget everything. Used by tests that count searches; keeping the
         same object matters, because the warmer holds a reference to it and a
         replacement instance would leave the two writing to different dicts."""
-        self._entries.clear()
-        self.hits = 0
-        self.misses = 0
+        with self._lock:
+            self._entries.clear()
+            self.hits = 0
+            self.misses = 0
 
     def peek(self, key: tuple[int, bool]) -> Analysis | None:
         """Look without counting.
 
         The background thread asks whether a position is already known, and
         its curiosity is nobody's cache hit."""
-        return self._entries.get(key)
+        with self._lock:
+            return self._entries.get(key)
 
     def get(self, key: tuple[int, bool]) -> Analysis | None:
-        found = self._entries.get(key)
-        if found is None:
-            self.misses += 1
-        else:
-            self.hits += 1
-        return found
+        with self._lock:
+            found = self._entries.get(key)
+            if found is None:
+                self.misses += 1
+            else:
+                self.hits += 1
+            return found
 
     def put(self, key: tuple[int, bool], analysis: Analysis) -> None:
-        # A racing writer can only ever store the same value for the same key,
-        # so no lock is needed here: the worst case is two threads computing
-        # the same analysis, which is exactly what happened before the cache.
-        entries = self._entries
-        entries[key] = analysis
-        while len(entries) > self._capacity:
-            entries.pop(next(iter(entries)), None)
+        # Two threads racing on the same key can only ever store the same
+        # value, so the store itself was never the hazard; the eviction that
+        # follows it is, and so are the counters. See ``__init__``.
+        with self._lock:
+            entries = self._entries
+            entries[key] = analysis
+            while len(entries) > self._capacity:
+                entries.pop(next(iter(entries)), None)
 
 
 class Warmer:

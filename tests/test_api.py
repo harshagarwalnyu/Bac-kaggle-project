@@ -19,6 +19,8 @@ tests would have caught a wrong evaluator being wired in.
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 
 import pytest
@@ -626,6 +628,57 @@ def test_the_cache_evicts_the_oldest_entry_rather_than_growing_forever():
     assert cache.get((1, False)) is None
     assert cache.get((2, False)) == "second"
     assert cache.get((3, False)) == "third"
+
+
+def test_the_cache_survives_the_warmer_and_a_request_writing_at_once():
+    """Eviction is two steps, and the warmer runs while requests do.
+
+    ``put`` names the oldest key and then drops it. Between those two steps
+    another thread can insert, and naming the oldest key iterates the dict --
+    which is exactly what raises RuntimeError("dictionary changed size during
+    iteration"). The cache is full whenever a session runs long enough, and the
+    warmer writes to it from its own thread by design, so both halves of that
+    race are ordinary operation rather than a contrived one.
+
+    The counters are checked in the same test because they have the quieter
+    version of the same bug: ``+= 1`` reads and then writes, so a racing pair
+    loses a count and the assertions about searches-per-turn start flickering.
+    """
+    cache = AnalysisCache(capacity=8)
+    writers, reads_per_writer = 8, 400
+    errors: list[BaseException] = []
+    start = threading.Barrier(writers)
+
+    def hammer(worker: int) -> None:
+        start.wait()
+        try:
+            for i in range(reads_per_writer):
+                cache.put((worker * reads_per_writer + i, False), "analysis")
+                cache.get((worker, False))
+                cache.peek((worker, False))
+        except BaseException as error:  # noqa: BLE001 -- the point of the test
+            errors.append(error)
+
+    # The default switch interval is long enough that the two steps of an
+    # eviction usually run without interruption; shortening it makes the race
+    # reliable instead of lucky.
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=hammer, args=(w,)) for w in range(writers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "a cache operation deadlocked"
+    finally:
+        sys.setswitchinterval(previous)
+
+    assert not errors, f"concurrent cache use raised {errors[0]!r}"
+    assert len(cache._entries) <= 8, "eviction stopped keeping the cache bounded"
+    assert cache.hits + cache.misses == writers * reads_per_writer, (
+        "a racing pair of ++ lost a count"
+    )
 
 
 def test_solver_and_ordinary_analyses_of_one_position_do_not_collide():
