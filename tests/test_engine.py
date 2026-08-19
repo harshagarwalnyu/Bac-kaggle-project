@@ -21,7 +21,13 @@ import random
 import pytest
 
 from connect4.bitboard import WIDTH, Position
-from connect4.engine import WIN_SCORE, Engine, heuristic_evaluator
+from connect4.engine import (
+    WIN_SCORE,
+    Analysis,
+    Engine,
+    SearchStats,
+    heuristic_evaluator,
+)
 
 # --------------------------------------------------------------------------
 # Reference solver -- no pruning, no table, no cleverness.
@@ -356,3 +362,36 @@ def test_evaluator_sees_positions_from_the_movers_point_of_view():
     """A symmetric position must evaluate to zero for whoever is to move."""
     mirrored = Position.from_moves([0, 6, 1, 5])  # symmetric about the centre column
     assert heuristic_evaluator(mirrored) == pytest.approx(0.0)
+
+
+def test_an_aborted_search_still_yields_a_playable_move(monkeypatch):
+    """The fallback in ``analyse`` has to survive the trip through the caller.
+
+    ``analyse`` deliberately names a legal move when the budget ran out before
+    depth 1 scored anything. ``choose_move`` used to answer -1 anyway, which
+    made that fallback dead code and left the API raising "no legal move" for a
+    board with six of them. The abort is forced here rather than provoked with
+    a tiny budget, because the abort check fires every 2048 nodes and depth 1
+    visits about seven -- the real path is rare, which is exactly why it needs a
+    test that does not depend on winning a race.
+    """
+    engine = Engine()
+    starved = Analysis(best_move=3, evaluations=[], stats=SearchStats())
+    monkeypatch.setattr(engine, "analyse", lambda *a, **k: starved)
+
+    for skill in range(6):
+        assert engine.choose_move(Position(), skill=skill) == 3
+
+
+def test_a_full_board_still_reports_no_move(monkeypatch):
+    """The other half of the same change: -1 has to keep meaning something.
+
+    Passing ``best_move`` through must not paper over a genuinely unplayable
+    board, or the API's 409 becomes unreachable and the bot answers with a
+    column that does not exist.
+    """
+    engine = Engine()
+    nothing = Analysis(best_move=-1, evaluations=[], stats=SearchStats())
+    monkeypatch.setattr(engine, "analyse", lambda *a, **k: nothing)
+
+    assert engine.choose_move(Position(), skill=5) == -1

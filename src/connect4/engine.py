@@ -272,7 +272,11 @@ class Engine:
         """
         analysis = self.analyse(pos)
         if not analysis.evaluations:
-            return -1
+            # Scored nothing, but ``analyse`` still names a legal move for
+            # exactly this case. Returning -1 would break that promise one
+            # line after it is made and leave the fallback as dead code, and
+            # the caller turns -1 into a 409 on a board that has legal moves.
+            return analysis.best_move
 
         ranked = analysis.evaluations
         top = ranked[0]

@@ -514,7 +514,11 @@ def _pick(analysis: Analysis, skill: int) -> int:
     """
     ranked = analysis.evaluations
     if not ranked:
-        return -1
+        # Scored nothing, but ``analyse`` still names a legal move for
+        # exactly this case. Returning -1 would break that promise one
+        # line after it is made and leave the fallback as dead code, and
+        # the caller turns -1 into a 409 on a board that has legal moves.
+        return analysis.best_move
 
     top = ranked[0]
     # Floor 1: an immediate win on the board is always taken.
@@ -655,7 +659,16 @@ def rematch(record_id: str, request: RematchRequest) -> dict:
     # rejected rematch that still left a game in the store would count against
     # the store's capacity and could evict a live game to make room for one
     # nobody can play.
-    resumed = Position.from_moves(replayed)
+    try:
+        resumed = Position.from_moves(replayed)
+    except ValueError as error:
+        # A prefix of a game played through this API is always legal, so the
+        # only way here is an archive record this process did not write:
+        # the JSONL log can be hand-edited, truncated mid-write, or left
+        # behind by an older version. Refusing deliberately means one bad
+        # line costs that record its rematches, not the server a 500 on
+        # every attempt. Same status ``new_game`` gives the same failure.
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if resumed.has_won() or resumed.is_draw():
         # Reachable when the caller asks for the full move list of a finished
         # game -- a win or a full board alike. Refuse rather than hand back a

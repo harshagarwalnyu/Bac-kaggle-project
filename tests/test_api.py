@@ -35,7 +35,7 @@ from connect4.api import (
     app,
 )
 from connect4.bitboard import HEIGHT, WIDTH, Position
-from connect4.engine import Analysis, MoveEvaluation
+from connect4.engine import Analysis, MoveEvaluation, SearchStats
 from connect4.history import GameHistory
 
 
@@ -838,3 +838,42 @@ def test_a_negative_rematch_ply_is_rejected(client):
     archived = finished_game(client)["game"]
     response = client.post(f"/api/history/{archived['id']}/rematch", json={"ply": -1})
     assert response.status_code == 422
+
+
+def test_a_rematch_of_a_corrupt_archive_line_is_refused_not_crashed(client):
+    """The archive is a file, and files arrive damaged.
+
+    ``Position.from_moves`` is the single authority on legality and it raises on
+    anything it rejects. A prefix of a game played through this API is always
+    legal, so the only way to reach that raise is a record this process did not
+    write -- the JSONL log can be hand-edited, truncated mid-write, or left
+    behind by an older version with a different notion of a legal move. Without
+    the refusal, one bad line turns every rematch of that record into a 500.
+
+    Eight stones in one column is the clearest example: six fit, and a rematch
+    replays all but the last ply, so seven of them still have to be refused.
+    """
+    record = client.app.state.history.record(
+        game_id="corrupt-line",
+        moves=[0, 0, 0, 0, 0, 0, 0, 0],
+        winner=0,
+        bot_player=2,
+        skill=3,
+        started=0.0,
+    )
+
+    response = client.post(f"/api/history/{record.id}/rematch", json={})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"], "a refusal should say what was wrong"
+
+
+def test_a_pick_with_nothing_scored_still_names_a_column():
+    """``_pick`` mirrors ``Engine.choose_move`` and has to mirror its fallback.
+
+    An analysis that scored nothing still carries a legal move, and answering -1
+    here is what the caller turns into "no legal move" for a board that has six.
+    """
+    starved = Analysis(best_move=4, evaluations=[], stats=SearchStats())
+    for skill in range(6):
+        assert _pick(starved, skill) == 4
