@@ -50,7 +50,7 @@ MAX_GAMES = 200
 # Seconds the bot may think per move. Tunable because the right value is a
 # property of the machine and the audience, not of the code: a demo wants two
 # seconds of visible deliberation, a test suite wants none of it.
-TIME_LIMIT_S = float(os.environ.get("CONNECT4_TIME_LIMIT", "2.0"))
+TIME_LIMIT_S = float(os.environ.get("CONNECT4_TIME_LIMIT", "1.0"))
 MAX_DEPTH = int(os.environ.get("CONNECT4_MAX_DEPTH", str(MAX_PLIES)))
 
 # Skill 6 is a separate mode, not another notch on the same dial, and it gets

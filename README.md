@@ -160,7 +160,7 @@ differently:
 | variable | default | meaning |
 |---|---|---|
 | `CONNECT4_HOST` / `CONNECT4_PORT` | `127.0.0.1` / `8000` | where to serve |
-| `CONNECT4_TIME_LIMIT` | `2.0` | search budget per move, seconds |
+| `CONNECT4_TIME_LIMIT` | `1.0` | search budget per move, seconds |
 | `CONNECT4_SOLVER_TIME_LIMIT` | `12.0` | budget in solver mode |
 | `CONNECT4_HISTORY` | `data/games.jsonl` | where the game archive is written |
 
