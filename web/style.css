@@ -48,7 +48,7 @@ main {
   max-width: 1180px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(320px, 480px) 1fr;
+  grid-template-columns: minmax(320px, 560px) 1fr;
   gap: 26px;
   /* `start` left the panel shrink-wrapped to its content, so its bottom edge
      landed at a different height from the board's on every tab. Stretching
@@ -79,7 +79,10 @@ main {
    towards me" reads as "I am winning" without a legend. */
 .evalbar {
   position: relative;
-  width: 20px;
+  /* Wide enough for the widest label it can hold. The number is up to five
+     monospace characters ("-12.4", "#-11"), which does not fit in the 20px a
+     pure bar would need, and a clipped evaluation is worse than a wider bar. */
+  width: 34px;
   flex: none;
   border-radius: 8px;
   overflow: hidden;
@@ -111,7 +114,7 @@ main {
   padding: 2px 0;
   border-radius: 5px;
   text-align: center;
-  font: 700 10px/1 var(--mono);
+  font: 700 11.5px/1 var(--mono);
   color: #f2f6fb;
   background: rgba(10, 13, 18, 0.82);
   letter-spacing: -0.03em;
