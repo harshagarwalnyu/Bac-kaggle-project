@@ -457,30 +457,32 @@ class Engine:
                 yield col, pos.played(col)
             return
 
-        # Both baselines are taken from ``pos``, i.e. before the move, and both
-        # are named for whose threats they are. Getting these two the wrong way
-        # round is easy and silent: ``winning_spots`` always speaks about the
-        # side to move, so the same call means *us* on ``pos`` and *them* on a
-        # child, and subtracting one from the other compares two different
-        # players' threats. That cannot corrupt a score -- ordering only decides
-        # what alpha-beta looks at first -- but it does throw away most of the
-        # pruning the heuristic is there to buy.
+        # The baseline is taken from ``pos``, i.e. before the move, and is named
+        # for whose threats it holds. Getting this the wrong way round is easy
+        # and silent: ``winning_spots`` always speaks about the side to move, so
+        # the same call means *us* on ``pos`` and *them* on a child. Comparing
+        # our threats after the move against the opponent's before it -- which
+        # this did -- cannot corrupt a score, since ordering only decides what
+        # alpha-beta looks at first, but it does throw away most of the pruning
+        # the heuristic is there to buy.
         mover_threats = pos.winning_spots()
-        opponent_threats = pos.opponent_winning_spots()
         ranked = []
         for col in rest:
             child = pos.played(col)
-            # In ``child`` the opponent is to move, so *their* threats are
-            # ``winning_spots`` and *ours* are ``opponent_winning_spots``.
+            # In ``child`` the opponent is to move, so *our* threats are its
+            # ``opponent_winning_spots``. More threats created is better.
+            #
+            # There is deliberately no second term for threats *conceded*: a
+            # move of ours cannot create one. The opponent's stones are
+            # untouched by it and a winning spot must be an empty cell, so the
+            # only thing our stone can do to their threat map is delete the
+            # entry it lands on. ``tests/test_bitboard.py`` pins that as an
+            # invariant. Subtracting a provably-zero count would just buy a
+            # second threat map per child on the hottest path in the search.
             created = popcount(child.opponent_winning_spots() & ~mover_threats)
-            conceded = popcount(child.winning_spots() & ~opponent_threats)
-            # More threats created is better; giving the opponent threats is
-            # worse. The second term was documented but never computed, which
-            # made every move that opens a square under an opponent four look
-            # exactly as good as one that does not.
-            ranked.append((conceded - created, col, child))
-        # Keyed on that score alone, so columns that come out equal keep their
-        # centre-out order.
+            ranked.append((-created, col, child))
+        # Keyed on the threat count alone, so columns that create equally many
+        # threats keep their centre-out order.
         ranked.sort(key=_threat_rank)
         for _, col, child in ranked:
             yield col, child

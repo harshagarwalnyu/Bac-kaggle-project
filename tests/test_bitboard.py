@@ -519,3 +519,37 @@ def test_played_agrees_with_copy_then_play(seed):
                 stepwise.mask,
                 stepwise.moves,
             ), f"column {col}\n{pos}"
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_our_move_can_never_hand_the_opponent_a_new_threat(seed):
+    """The opponent's threat map only ever shrinks when we play.
+
+    Not a curiosity: the move ordering in ``Engine._ordered_moves`` scores a
+    candidate by the threats it creates and *not* by the threats it concedes,
+    and this is why the second term would be worthless. A winning spot has to
+    be an empty cell of a run of three of theirs; our stone changes neither
+    their stones nor the geometry, so the only thing it can do to their map is
+    delete the entry it lands on. Anything computing the difference would be
+    paying for a second threat map per child to add zero.
+    """
+    rng = random.Random(seed)
+    for _ in range(150):
+        pos = Position()
+        for _ in range(rng.randint(0, 25)):
+            legal = [c for c in range(WIDTH) if pos.can_play(c)]
+            if not legal or pos.has_won():
+                break
+            pos = pos.played(rng.choice(legal))
+        if pos.has_won() or pos.is_draw():
+            continue
+
+        theirs = pos.opponent_winning_spots()
+        for col in range(WIDTH):
+            if not pos.can_play(col):
+                continue
+            # In the child the opponent is to move, so *their* map is the one
+            # ``winning_spots`` describes.
+            after = pos.played(col).winning_spots()
+            assert not after & ~theirs, f"column {col} created a threat\n{pos}"
+            assert after == theirs & ~pos._landing_bit(col) or after == theirs
