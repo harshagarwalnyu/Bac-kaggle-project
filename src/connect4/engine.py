@@ -28,6 +28,7 @@ that flag. Presenting a guess as a proof would be the real failure here.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -178,24 +179,50 @@ class Engine:
         self.persist_table = persist_table
         self.table_capacity = table_capacity
         self._table: dict[int, tuple[int, float, int, bool]] = {}
+        #
+        # A search keeps its deadline, its statistics and its table on ``self``,
+        # which is fine for one caller and wrong for two. FastAPI runs synchronous
+        # handlers in a threadpool and the app shares one Engine across requests,
+        # so without this lock a second request resets ``_deadline`` underneath a
+        # search already running -- a 12-second solve silently becomes a
+        # 2-second one, its node counts land in the other request's stats, and
+        # concurrent writes to the table can raise outright.
+        #
+        # Serialising is the honest fix rather than a limitation: the searches
+        # are CPU-bound and hold the GIL regardless, so letting them interleave
+        # buys no throughput, only corruption.
+        self._lock = threading.Lock()
         self._stats = SearchStats()
         self._deadline = 0.0
 
     # ------------------------------------------------------------------ public
 
-    def analyse(self, pos: Position) -> Analysis:
+    def analyse(self, pos: Position, time_limit_s: float | None = None) -> Analysis:
         """Score every legal move, best first.
+
+        ``time_limit_s`` overrides the engine's default budget for this one
+        call. That exists so an advisory search can borrow a long-budget
+        engine's warm transposition table without also borrowing its clock.
 
         Each child is searched with a *full* window rather than the usual
         null-window re-search. That is slower, but it yields a real score for
         every column instead of just "worse than the best one" -- and showing
         every column is the entire premise of the glass-box UI.
+
+        Serialised: the search state lives on ``self`` and the app shares one
+        engine across requests. See ``_lock``.
         """
+        with self._lock:
+            return self._analyse(pos, time_limit_s)
+
+    def _analyse(self, pos: Position, time_limit_s: float | None = None) -> Analysis:
         start = time.perf_counter()
         if not self.persist_table or len(self._table) > self.table_capacity:
             self._table.clear()
         self._stats = SearchStats()
-        self._deadline = start + self.time_limit_s
+        self._deadline = start + (
+            self.time_limit_s if time_limit_s is None else time_limit_s
+        )
 
         legal = pos.legal_moves()
         if not legal:
@@ -222,9 +249,17 @@ class Engine:
                 break
 
         best.sort(key=lambda e: e.score, reverse=True)
-        best_move = best[0].column if best else legal[0]
         self._stats.elapsed_ms = (time.perf_counter() - start) * 1000.0
 
+        if not best:
+            # Aborted before depth 1 finished, so nothing has been scored. Name
+            # a legal move so callers always get something playable, but do not
+            # draw a principal variation for it: a line through a position we
+            # never searched would be invention, and the UI would render it with
+            # exactly the same confidence as a real one.
+            return Analysis(best_move=legal[0], evaluations=[], stats=self._stats)
+
+        best_move = best[0].column
         return Analysis(
             best_move=best_move,
             evaluations=best,
@@ -258,7 +293,11 @@ class Engine:
         """
         analysis = self.analyse(pos)
         if not analysis.evaluations:
-            return -1
+            # Scored nothing, but ``analyse`` still names a legal move for
+            # exactly this case. Returning -1 would break that promise one
+            # line after it is made and leave the fallback as dead code, and
+            # the caller turns -1 into a 409 on a board that has legal moves.
+            return analysis.best_move
 
         ranked = analysis.evaluations
         top = ranked[0]
@@ -418,15 +457,30 @@ class Engine:
                 yield col, pos.played(col)
             return
 
-        opponent_wins = pos.opponent_winning_spots()
+        # Both baselines are taken from ``pos``, i.e. before the move, and both
+        # are named for whose threats they are. Getting these two the wrong way
+        # round is easy and silent: ``winning_spots`` always speaks about the
+        # side to move, so the same call means *us* on ``pos`` and *them* on a
+        # child, and subtracting one from the other compares two different
+        # players' threats. That cannot corrupt a score -- ordering only decides
+        # what alpha-beta looks at first -- but it does throw away most of the
+        # pruning the heuristic is there to buy.
+        mover_threats = pos.winning_spots()
+        opponent_threats = pos.opponent_winning_spots()
         ranked = []
         for col in rest:
             child = pos.played(col)
-            # More threats created is better; giving the opponent threats is worse.
-            created = popcount(child.opponent_winning_spots() & ~opponent_wins)
-            ranked.append((-created, col, child))
-        # Keyed on the threat count alone, so columns that create equally many
-        # threats keep their centre-out order.
+            # In ``child`` the opponent is to move, so *their* threats are
+            # ``winning_spots`` and *ours* are ``opponent_winning_spots``.
+            created = popcount(child.opponent_winning_spots() & ~mover_threats)
+            conceded = popcount(child.winning_spots() & ~opponent_threats)
+            # More threats created is better; giving the opponent threats is
+            # worse. The second term was documented but never computed, which
+            # made every move that opens a square under an opponent four look
+            # exactly as good as one that does not.
+            ranked.append((conceded - created, col, child))
+        # Keyed on that score alone, so columns that come out equal keep their
+        # centre-out order.
         ranked.sort(key=_threat_rank)
         for _, col, child in ranked:
             yield col, child

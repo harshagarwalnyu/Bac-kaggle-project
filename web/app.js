@@ -200,7 +200,12 @@ function render() {
   el.playBest.textContent =
     assistColumn === null ? "Play best" : `Play best — column ${assistColumn}`;
 
-  el.undo.disabled = state.busy || state.game.moves.length === 0;
+  // Undo takes back the human's turn, so it needs one to exist: a bot-first
+  // game showing only the bot's opening has nothing to give back.
+  const humanPlies = state.game.moves.filter(
+    (_, i) => 1 + (i % 2) === humanPlayer(),
+  ).length;
+  el.undo.disabled = state.busy || humanPlies === 0;
   el.newGame.disabled = state.busy;
   el.solverBanner.hidden = !solverMode();
   el.skill.classList.toggle("solver", solverMode());

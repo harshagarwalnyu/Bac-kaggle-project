@@ -21,3 +21,6 @@ models/*.tmp
 
 # Local game log. It is one player's session history, not project source.
 data/games.jsonl
+
+# Claude Code session state -- machine-local, never shared.
+.claude/

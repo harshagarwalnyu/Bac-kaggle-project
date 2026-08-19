@@ -21,7 +21,13 @@ import random
 import pytest
 
 from connect4.bitboard import WIDTH, Position
-from connect4.engine import WIN_SCORE, Engine, heuristic_evaluator
+from connect4.engine import (
+    WIN_SCORE,
+    Analysis,
+    Engine,
+    SearchStats,
+    heuristic_evaluator,
+)
 
 # --------------------------------------------------------------------------
 # Reference solver -- no pruning, no table, no cleverness.
@@ -249,6 +255,60 @@ def test_time_limit_is_respected():
     assert analysis.best_move in range(WIDTH)
 
 
+def test_a_per_call_budget_overrides_the_engine_default():
+    """The advisory search borrows the solver's warm table, not its clock."""
+    engine = Engine(max_depth=42, time_limit_s=30.0)
+    analysis = engine.analyse(Position(), time_limit_s=0.3)
+    assert analysis.stats.elapsed_ms < 2500, "the per-call budget was ignored"
+
+
+def test_an_aborted_search_names_a_move_without_inventing_a_variation():
+    """A budget too small to finish depth 1 leaves nothing scored.
+
+    Callers still need something playable, but a principal variation through a
+    position that was never searched is invention -- and the UI would draw it
+    with exactly the same confidence as a real one.
+    """
+    engine = Engine(max_depth=42, time_limit_s=0.0)
+    analysis = engine.analyse(Position())
+
+    assert analysis.best_move in range(WIDTH)
+    if not analysis.evaluations:
+        assert analysis.principal_variation == []
+
+
+def test_concurrent_searches_do_not_corrupt_each_other():
+    """FastAPI runs synchronous handlers in a threadpool and the app shares one
+    engine, so two requests really do land in ``analyse`` at once. Without the
+    lock, one search resets the other's deadline and stats mid-flight."""
+    import threading
+
+    engine = Engine(max_depth=8, time_limit_s=0.4)
+    results: list = []
+    errors: list = []
+
+    def search(moves):
+        try:
+            results.append(engine.analyse(Position.from_moves(moves)))
+        except Exception as error:  # pragma: no cover - the failure being tested
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=search, args=(moves,))
+        for moves in ([3], [3, 3], [2, 4], [3, 2, 4], [0], [1])
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, f"concurrent searches raised: {errors}"
+    assert len(results) == len(threads)
+    for analysis in results:
+        assert analysis.best_move in range(WIDTH)
+        assert analysis.stats.nodes > 0, "a search was robbed of its own statistics"
+
+
 def test_no_legal_moves_on_a_full_board():
     pos = Position()
     order = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
@@ -302,3 +362,36 @@ def test_evaluator_sees_positions_from_the_movers_point_of_view():
     """A symmetric position must evaluate to zero for whoever is to move."""
     mirrored = Position.from_moves([0, 6, 1, 5])  # symmetric about the centre column
     assert heuristic_evaluator(mirrored) == pytest.approx(0.0)
+
+
+def test_an_aborted_search_still_yields_a_playable_move(monkeypatch):
+    """The fallback in ``analyse`` has to survive the trip through the caller.
+
+    ``analyse`` deliberately names a legal move when the budget ran out before
+    depth 1 scored anything. ``choose_move`` used to answer -1 anyway, which
+    made that fallback dead code and left the API raising "no legal move" for a
+    board with six of them. The abort is forced here rather than provoked with
+    a tiny budget, because the abort check fires every 2048 nodes and depth 1
+    visits about seven -- the real path is rare, which is exactly why it needs a
+    test that does not depend on winning a race.
+    """
+    engine = Engine()
+    starved = Analysis(best_move=3, evaluations=[], stats=SearchStats())
+    monkeypatch.setattr(engine, "analyse", lambda *a, **k: starved)
+
+    for skill in range(6):
+        assert engine.choose_move(Position(), skill=skill) == 3
+
+
+def test_a_full_board_still_reports_no_move(monkeypatch):
+    """The other half of the same change: -1 has to keep meaning something.
+
+    Passing ``best_move`` through must not paper over a genuinely unplayable
+    board, or the API's 409 becomes unreachable and the bot answers with a
+    column that does not exist.
+    """
+    engine = Engine()
+    nothing = Analysis(best_move=-1, evaluations=[], stats=SearchStats())
+    monkeypatch.setattr(engine, "analyse", lambda *a, **k: nothing)
+
+    assert engine.choose_move(Position(), skill=5) == -1

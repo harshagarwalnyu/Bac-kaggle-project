@@ -35,7 +35,7 @@ killed the obvious approach, and what replaced it.
 | API | FastAPI + Pydantic | Handlers are sync; validation lives in the request models, so a bad column is a 422 and never an IndexError deeper down. |
 | UI | **vanilla HTML/CSS/JS** — no React, no build step, no CDN | The DOM is a pure function of one state object. The whole install is one command. |
 | storage | append-only JSONL | Not SQLite — see section 6. |
-| tests | pytest, 308 tests, including differential tests and gradient checks | |
+| tests | pytest, 342 tests, including differential tests and gradient checks | |
 | tooling | `uv` | `uv sync`, then `uv run python -m connect4.api`. |
 
 **If they ask "did you use AI?"** — answer straight: yes, as a pair programmer

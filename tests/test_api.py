@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,15 +30,20 @@ from fastapi.testclient import TestClient
 from connect4.api import (
     HUMAN,
     MAX_GAMES,
+    ROOT,
     SOLVER_SKILL,
     TIME_LIMIT_S,
     AnalysisCache,
     Store,
     Warmer,
+    _analyse,
+    _analysis_payload,
+    _history_path,
+    _pick,
     app,
 )
 from connect4.bitboard import HEIGHT, WIDTH, Position
-from connect4.engine import Engine
+from connect4.engine import Analysis, Engine, MoveEvaluation, SearchStats
 from connect4.history import GameHistory
 
 
@@ -64,24 +70,44 @@ def new_game(client, **body) -> dict:
     return response.json()
 
 
+def game_from(client, moves, **body) -> dict:
+    """A game that has already been played up to ``moves``.
+
+    Set-up positions go in through the opening parameter rather than through a
+    run of ``POST /moves``, because that endpoint now only accepts moves from
+    the side whose turn it actually is -- correctly, since letting a client play
+    both sides is the bug that made a double-click move twice. Replaying an
+    opening is the supported way to reach a position, and it is one request
+    instead of a dozen.
+    """
+    return new_game(client, moves=list(moves), **body)
+
+
 def play(client, game_id: str, column: int) -> dict:
     return client.post(f"/api/games/{game_id}/moves", json={"column": column}).json()
 
 
-def fill_column(client, game_id: str, column: int = 0) -> dict:
-    """Fill one column without ending the game.
+FULL_COLUMN = [0] * HEIGHT
+"""Six stones stacked in column 0, alternating owner, with nobody winning.
 
-    Six *consecutive* plays into the same column is the trick. Because the
-    endpoint alternates players automatically, the column comes out
-    yellow-red-yellow-red-yellow-red -- no vertical four, and a single column
-    cannot make a horizontal or diagonal one either. The obvious version of
-    this helper (drop in column 0, answer in column 6) hands player 1 four in a
-    row and ends the game on the seventh ply, which silently turns every
-    assertion about the resulting analysis into an assertion about ``None``.
-    """
-    body: dict = {}
-    for _ in range(HEIGHT):
-        body = play(client, game_id, column)
+Six plays into the *same* column is the trick: the sides alternate, so the
+column comes out yellow-red-yellow-red-yellow-red -- no vertical four, and a
+single column cannot make a horizontal or diagonal one either. The obvious
+version (drop in column 0, answer in column 6) hands player 1 four in a row and
+ends the game on the seventh ply, which silently turns every assertion about
+the resulting analysis into an assertion about ``None``.
+"""
+
+VERTICAL_FOUR = [0, 6, 0, 6, 0, 6, 0]
+"""The shortest deterministic finished game: player 1 wins in column 0.
+
+Exactly the accident ``FULL_COLUMN`` exists to avoid, used here on purpose.
+"""
+
+
+def fill_column(client, column: int = 0) -> dict:
+    """A game whose column ``column`` is full and which is still playable."""
+    body = game_from(client, [column] * HEIGHT)
     assert body["game"]["status"] == "playing", "the filler ended the game"
     return body
 
@@ -124,10 +150,8 @@ def test_grid_matches_the_engines_own_rendering(client):
     expectation, because the question is whether the *serialisation* is faithful,
     not whether the bitboard is right -- that is settled in test_bitboard.py.
     """
-    game_id = new_game(client)["game"]["id"]
     columns = [3, 3, 4, 2, 4]
-    for column in columns:
-        body = play(client, game_id, column)
+    body = game_from(client, columns)
 
     assert body["game"]["grid"] == Position.from_moves(columns).to_grid()
     assert body["game"]["moves"] == columns
@@ -136,9 +160,8 @@ def test_grid_matches_the_engines_own_rendering(client):
 
 
 def test_turn_alternates(client):
-    game_id = new_game(client)["game"]["id"]
-    assert play(client, game_id, 0)["game"]["turn"] == 2
-    assert play(client, game_id, 1)["game"]["turn"] == 1
+    assert game_from(client, [0])["game"]["turn"] == 2
+    assert game_from(client, [0, 1])["game"]["turn"] == 1
 
 
 # --------------------------------------------------------------------------
@@ -152,12 +175,12 @@ def test_a_win_is_reported_with_the_right_winner(client):
     ``has_won`` speaks about the side that just *moved*, and the off-by-one
     there is easy to get wrong in the serialiser -- so it is pinned down.
     """
-    game_id = new_game(client)["game"]["id"]
-    for column in (0, 1, 0, 1, 0, 1):
-        body = play(client, game_id, column)
-        assert body["game"]["status"] == "playing"
+    body = game_from(client, [0, 1, 0, 1, 0, 1])
+    assert body["game"]["status"] == "playing"
 
-    body = play(client, game_id, 0)
+    # Played rather than replayed, so the *transition* into a won state goes
+    # through the same handler a real client would use.
+    body = play(client, body["game"]["id"], 0)
     game = body["game"]
     assert game["status"] == "won"
     assert game["winner"] == 1
@@ -167,9 +190,7 @@ def test_a_win_is_reported_with_the_right_winner(client):
 
 
 def test_moves_are_refused_after_the_game_ends(client):
-    game_id = new_game(client)["game"]["id"]
-    for column in (0, 1, 0, 1, 0, 1, 0):
-        play(client, game_id, column)
+    game_id = game_from(client, VERTICAL_FOUR)["game"]["id"]
 
     response = client.post(f"/api/games/{game_id}/moves", json={"column": 3})
     assert response.status_code == 409
@@ -179,8 +200,7 @@ def test_moves_are_refused_after_the_game_ends(client):
 
 
 def test_a_full_column_is_refused(client):
-    game_id = new_game(client)["game"]["id"]
-    fill_column(client, game_id, 0)
+    game_id = fill_column(client, 0)["game"]["id"]
 
     body = client.get(f"/api/games/{game_id}").json()
     assert 0 not in body["game"]["legal_moves"]
@@ -225,8 +245,7 @@ def test_analysis_describes_the_position_in_the_same_response(client):
     board". A column that is full cannot be analysed, which makes it a usable
     fingerprint of which position was searched.
     """
-    game_id = new_game(client)["game"]["id"]
-    fill_column(client, game_id, 0)
+    game_id = fill_column(client, 0)["game"]["id"]
 
     body = client.get(f"/api/games/{game_id}").json()
     analysed = {entry["column"] for entry in body["analysis"]["columns"]}
@@ -278,11 +297,7 @@ def test_a_forced_block_is_reported_as_a_proven_loss(client):
     than column 0 is a proven loss, and the engine should be returning proofs
     rather than opinions about them.
     """
-    game_id = new_game(client)["game"]["id"]
-    for column in (0, 1, 0, 1, 0):
-        play(client, game_id, column)
-
-    analysis = client.get(f"/api/games/{game_id}").json()["analysis"]
+    analysis = game_from(client, [0, 1, 0, 1, 0])["analysis"]
     assert analysis["best_move"] == 0, "the block is the only move"
 
     others = [e for e in analysis["columns"] if e["column"] != 0]
@@ -317,10 +332,8 @@ def test_the_bot_plays_a_legal_move_and_reports_what_it_saw(client):
 def test_the_bot_always_takes_a_win_on_the_board(client, skill):
     """The first hard floor. Missing a four that is sitting there reads as a
     bug, not as easy mode -- so it must hold even at skill 0."""
-    game_id = new_game(client, bot_first=True)["game"]["id"]
     # Bot is player 1. Give it three in column 0 with player 2 answering in 1.
-    for column in (0, 1, 0, 1, 0, 1):
-        play(client, game_id, column)
+    game_id = game_from(client, [0, 1, 0, 1, 0, 1], bot_first=True)["game"]["id"]
 
     body = client.post(f"/api/games/{game_id}/bot-move", json={"skill": skill}).json()
     assert body["played"] == 0
@@ -330,9 +343,8 @@ def test_the_bot_always_takes_a_win_on_the_board(client, skill):
 @pytest.mark.parametrize("skill", [0, 3, 5])
 def test_the_bot_always_blocks_an_immediate_threat(client, skill):
     """The second hard floor: weaker play, never suicidal play."""
-    game_id = new_game(client)["game"]["id"]
-    for column in (0, 1, 0, 1, 0):  # human threatens to complete column 0
-        play(client, game_id, column)
+    # Human threatens to complete column 0.
+    game_id = game_from(client, [0, 1, 0, 1, 0])["game"]["id"]
 
     body = client.post(f"/api/games/{game_id}/bot-move", json={"skill": skill}).json()
     assert body["played"] == 0, f"skill {skill} walked into an immediate loss"
@@ -402,9 +414,7 @@ def test_undo_on_an_empty_game_is_harmless(client):
 
 
 def test_undo_reopens_a_finished_game(client):
-    game_id = new_game(client)["game"]["id"]
-    for column in (0, 1, 0, 1, 0, 1, 0):
-        play(client, game_id, column)
+    game_id = game_from(client, VERTICAL_FOUR)["game"]["id"]
     assert client.get(f"/api/games/{game_id}").json()["game"]["status"] == "won"
 
     body = client.post(f"/api/games/{game_id}/undo").json()
@@ -456,25 +466,21 @@ def test_the_front_end_is_served(client, path):
 # --------------------------------------------------------------------------
 
 
-def win_for_player_one(client, game_id: str) -> dict:
-    """Play a vertical four in column 0 while the opponent answers in column 6.
+def finished_game(client) -> dict:
+    """A game that is already over, archived, and won by player one.
 
-    This is exactly the accident that `fill_column` exists to avoid, used here
-    on purpose: it is the shortest deterministic finished game.
+    The opening goes in whole rather than ply by ply, because the archive is
+    written by whatever describes a finished position -- it does not care
+    whether the moves arrived one request at a time.
     """
-    body: dict = {}
-    for i in range(4):
-        body = play(client, game_id, 0)
-        if i < 3:
-            body = play(client, game_id, 6)
+    body = game_from(client, VERTICAL_FOUR)
     assert body["game"]["status"] == "won"
     return body
 
 
 def test_a_finished_game_is_archived_exactly_once(client):
     before = client.get("/api/history").json()["summary"]["games"]
-    game_id = new_game(client)["game"]["id"]
-    win_for_player_one(client, game_id)
+    game_id = finished_game(client)["game"]["id"]
 
     # Re-reading a finished game must not append it again.
     client.get(f"/api/games/{game_id}")
@@ -494,8 +500,8 @@ def test_an_unfinished_game_is_not_archived(client):
 
 
 def test_the_archived_record_replays_to_the_finished_position(client):
-    game_id = new_game(client)["game"]["id"]
-    final = win_for_player_one(client, game_id)["game"]
+    final = finished_game(client)["game"]
+    game_id = final["id"]
 
     record = client.get(f"/api/history/{game_id}").json()
     assert record["moves"] == final["moves"]
@@ -508,9 +514,8 @@ def test_the_archived_record_replays_to_the_finished_position(client):
 
 
 def test_the_outcome_is_phrased_from_the_humans_point_of_view(client):
-    game_id = new_game(client)["game"]["id"]
-    body = win_for_player_one(client, game_id)["game"]
-    record = client.get(f"/api/history/{game_id}").json()
+    body = finished_game(client)["game"]
+    record = client.get(f"/api/history/{body['id']}").json()
     human_won = body["winner"] != body["bot_player"]
     assert record["outcome"] == ("you won" if human_won else "bot won")
 
@@ -518,9 +523,7 @@ def test_the_outcome_is_phrased_from_the_humans_point_of_view(client):
 def test_history_is_newest_first(client):
     ids = []
     for _ in range(3):
-        game_id = new_game(client)["game"]["id"]
-        win_for_player_one(client, game_id)
-        ids.append(game_id)
+        ids.append(finished_game(client)["game"]["id"])
     listing = [entry["id"] for entry in client.get("/api/history").json()["games"]]
     assert listing[:3] == list(reversed(ids))
 
@@ -530,8 +533,7 @@ def test_unknown_history_entry_is_a_404(client):
 
 
 def test_history_can_be_cleared(client):
-    game_id = new_game(client)["game"]["id"]
-    win_for_player_one(client, game_id)
+    finished_game(client)
     assert client.get("/api/history").json()["summary"]["games"] > 0
 
     body = client.delete("/api/history").json()
@@ -542,8 +544,7 @@ def test_history_can_be_cleared(client):
 
 def test_the_summary_counts_wins_losses_and_draws(client):
     client.delete("/api/history")
-    game_id = new_game(client)["game"]["id"]
-    final = win_for_player_one(client, game_id)["game"]
+    final = finished_game(client)["game"]
 
     summary = client.get("/api/history").json()["summary"]
     assert summary["games"] == 1
@@ -681,6 +682,71 @@ def test_the_cache_survives_the_warmer_and_a_request_writing_at_once():
     )
 
 
+def test_the_solver_panels_short_search_never_feeds_the_bots_own_move(client, monkeypatch):
+    """Solver mode runs two searches per turn on two different clocks.
+
+    The move it plays gets the long budget; the commentary that follows is
+    deliberately capped at the normal one, so the user does not wait twice.
+    Those are different answers about the same board -- the capped one is
+    shallower -- so they must not share a cache entry. Sharing it would let the
+    panel's cheap search decide the bot's move, silently costing solver mode
+    most of its strength.
+    """
+    app.state.analysis_cache.clear()
+    budgets = []
+
+    def recorded(position, *, time_limit_s=None):
+        budgets.append(time_limit_s)
+        return Analysis(
+            best_move=3,
+            evaluations=[MoveEvaluation(column=3, score=0.5, exact=False)],
+            stats=SearchStats(),
+        )
+
+    monkeypatch.setattr(app.state.solver, "analyse", recorded)
+    pos = Position.from_moves([3, 3])
+
+    _analysis_payload(pos, SOLVER_SKILL)
+    assert budgets == [TIME_LIMIT_S], "the panel's search must be capped"
+
+    _analyse(pos, SOLVER_SKILL)
+    assert budgets == [TIME_LIMIT_S, None], (
+        "the bot's own search must not be served the capped answer"
+    )
+
+    # The other direction is sound and worth keeping: the full answer is at
+    # least as deep as a capped one, so the panel reuses it rather than paying
+    # for a third search.
+    _analysis_payload(pos, SOLVER_SKILL)
+    assert budgets == [TIME_LIMIT_S, None]
+
+
+def test_capping_is_ignored_outside_solver_mode(client, monkeypatch):
+    """An ordinary turn must stay one search.
+
+    ``TIME_LIMIT_S`` is already the normal engine's budget, so a capped request
+    and an uncapped one are the same question; keying them apart would put the
+    turn back to two searches, which is exactly what the cache exists to stop.
+    """
+    app.state.analysis_cache.clear()
+    calls = []
+
+    def recorded(position, *, time_limit_s=None):
+        calls.append(time_limit_s)
+        return Analysis(
+            best_move=3,
+            evaluations=[MoveEvaluation(column=3, score=0.5, exact=False)],
+            stats=SearchStats(),
+        )
+
+    monkeypatch.setattr(app.state.engine, "analyse", recorded)
+    pos = Position.from_moves([3, 3])
+
+    _analysis_payload(pos, 5)
+    _analyse(pos, 5)
+    assert calls == [None], calls
+
+
 def test_solver_and_ordinary_analyses_of_one_position_do_not_collide():
     # Same board, two engines, two budgets: the deeper answer must not be
     # served to a normal game, nor the shallow one to the solver.
@@ -725,7 +791,7 @@ def test_waiting_for_the_human_is_spent_analysing_their_replies(client, warming)
     # the server has already thought about.
     empty = Position()
     for column in empty.legal_moves():
-        key = (empty.played(column).key(), False)
+        key = (empty.played(column).key(), False, False)
         assert app.state.analysis_cache.peek(key) is not None, f"column {column} left cold"
 
 
@@ -788,3 +854,351 @@ def test_a_disabled_warmer_ignores_work(client):
     warmer.schedule([Position.from_moves([0])])
     assert warmer.wait_idle(timeout=5.0)
     assert warmer.warmed == before
+
+
+# --------------------------------------------------------------------------
+# Openings
+# --------------------------------------------------------------------------
+
+
+def test_an_opening_is_replayed_into_the_new_game(client):
+    """A game is its move list, so handing one over must reach that position."""
+    body = game_from(client, [3, 3])
+    assert body["game"]["moves"] == [3, 3]
+    assert body["game"]["grid"] == Position.from_moves([3, 3]).to_grid()
+    assert body["game"]["turn"] == HUMAN, "an even opening comes back to the human"
+
+
+@pytest.mark.parametrize(
+    "opening",
+    [
+        [0] * (HEIGHT + 1),  # one stone more than the column can hold
+        [WIDTH],  # off the right-hand edge
+        [-1],
+    ],
+)
+def test_an_illegal_opening_is_refused_rather_than_clamped(client, opening):
+    """Clamping would quietly produce a *different* position than the one asked
+    for, which is worse than an error: the client would never find out."""
+    assert client.post("/api/games", json={"moves": opening}).status_code == 422
+
+
+def test_a_rejected_opening_leaves_no_game_behind(client):
+    before = len(app.state.store._games)
+    client.post("/api/games", json={"moves": [0] * (HEIGHT + 1)})
+    assert len(app.state.store._games) == before
+
+
+# --------------------------------------------------------------------------
+# Whose turn it is
+# --------------------------------------------------------------------------
+
+
+def test_the_human_cannot_play_twice_in_a_row(client):
+    """A double-click on a column used to play both sides."""
+    game_id = new_game(client)["game"]["id"]
+    assert client.post(f"/api/games/{game_id}/moves", json={"column": 3}).status_code == 200
+
+    second = client.post(f"/api/games/{game_id}/moves", json={"column": 3})
+    assert second.status_code == 409
+    assert client.get(f"/api/games/{game_id}").json()["game"]["moves"] == [3]
+
+
+def test_the_bot_will_not_move_out_of_turn(client):
+    """The mirror: a stray retry used to hand the bot two plies in a row."""
+    game_id = new_game(client)["game"]["id"]
+    response = client.post(f"/api/games/{game_id}/bot-move", json={})
+    assert response.status_code == 409
+    assert client.get(f"/api/games/{game_id}").json()["game"]["moves"] == []
+
+
+def test_simultaneous_moves_on_one_game_produce_exactly_one_ply(client):
+    """The turn check and the append have to be one indivisible step.
+
+    FastAPI runs synchronous handlers in a threadpool, so these really do run
+    at the same time. Checking whose turn it is and *then* appending lets both
+    requests read the same empty board, both conclude it is the human's turn,
+    and both append -- one click, two plies, and the human has played the bot's
+    move for it.
+    """
+    import threading
+
+    game_id = new_game(client)["game"]["id"]
+    start = threading.Barrier(6)
+    codes: list[int] = []
+    guard = threading.Lock()
+
+    def play():
+        start.wait()
+        response = client.post(f"/api/games/{game_id}/moves", json={"column": 3})
+        with guard:
+            codes.append(response.status_code)
+
+    threads = [threading.Thread(target=play) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert codes.count(200) == 1, f"more than one move was accepted: {codes}"
+    assert set(codes) <= {200, 409}, f"an unexpected status came back: {codes}"
+    assert client.get(f"/api/games/{game_id}").json()["game"]["moves"] == [3]
+
+
+# --------------------------------------------------------------------------
+# Undo, when the bot opened
+# --------------------------------------------------------------------------
+
+
+def test_undo_gives_the_move_back_to_the_human_whoever_opened(client):
+    """Bot-first games go bot, human, bot, human, so "a turn" is a different
+    pair of plies than it is in a human-first game. Undo is defined by the turn
+    it hands back, not by a fixed count -- popping two from the bot's opening
+    ply alone would delete a move nobody asked to take back.
+    """
+    game_id = game_from(client, [3, 3, 4], bot_first=True)["game"]["id"]
+
+    body = client.post(f"/api/games/{game_id}/undo").json()
+
+    # The human's 3 and the bot's reply 4 come off; the bot's *opening* stays.
+    assert body["game"]["moves"] == [3]
+    human = 3 - body["game"]["bot_player"]
+    assert body["game"]["turn"] == human
+
+
+def test_undo_never_strands_the_bot_on_move(client):
+    """The invariant behind the test above, checked from the other opening."""
+    game_id = game_from(client, [3, 3], bot_first=True)["game"]["id"]
+    body = client.post(f"/api/games/{game_id}/undo").json()
+    assert body["game"]["turn"] == 3 - body["game"]["bot_player"]
+
+
+def test_undo_keeps_the_bots_opening_when_that_is_all_there_is(client):
+    """The gap the test above leaves: one bot ply, and nothing of the human's.
+
+    Popping it empties the board and leaves the bot on move -- and nothing ever
+    asks the bot to play from there. The client requests a bot move after a
+    human move or a new game, never after an undo; the undo button disables
+    itself at zero plies; and a human move into the bot's turn is refused with
+    409. The game is unrecoverable except by starting another one, so undo has
+    to decline instead.
+    """
+    game_id = game_from(client, [3], bot_first=True)["game"]["id"]
+
+    body = client.post(f"/api/games/{game_id}/undo").json()
+
+    human = 3 - body["game"]["bot_player"]
+    assert body["game"]["moves"] == [3], "the bot's opening is not the human's to undo"
+    assert body["game"]["turn"] == human
+
+    # The proof that it matters: the human can still play.
+    followed = client.post(f"/api/games/{game_id}/moves", json={"column": 2})
+    assert followed.status_code == 200
+    assert followed.json()["game"]["moves"] == [3, 2]
+
+
+def test_repeated_undo_never_walks_a_bot_first_game_off_the_board(client):
+    """Undo is idempotent once the human has nothing left to take back."""
+    game_id = game_from(client, [3, 3, 4, 4], bot_first=True)["game"]["id"]
+
+    seen = []
+    for _ in range(5):
+        body = client.post(f"/api/games/{game_id}/undo").json()
+        seen.append(tuple(body["game"]["moves"]))
+        assert body["game"]["turn"] == 3 - body["game"]["bot_player"]
+
+    # The human's own last ply comes off first (the bot has not replied to it
+    # yet), then the pair below it, and then there is nothing left to give.
+    assert seen == [(3, 3, 4), (3,), (3,), (3,), (3,)], seen
+
+
+# --------------------------------------------------------------------------
+# Difficulty, when the easy move loses
+# --------------------------------------------------------------------------
+
+
+def _evaluation(column: int, score: float, exact: bool = False, mate_in=None):
+    return MoveEvaluation(column=column, score=score, exact=exact, mate_in=mate_in)
+
+
+def test_an_unsafe_easy_move_is_replaced_by_a_near_one_not_the_best_one(client):
+    """Safety must not silently promote easy mode to perfect play.
+
+    Ranked best-first, the skill-0 candidate is index 5. It loses, so a
+    replacement is needed -- but scanning from the top would return column 0,
+    the strongest move on the board, which is exactly what the dial promised
+    not to do. Walking outward finds the neighbour at index 6, the weaker of
+    the two adjacent safe moves and so the one that stays closest to the
+    strength the dial asked for.
+    """
+    ranked = [_evaluation(column, 1.0 - column * 0.1) for column in range(WIDTH)]
+    ranked[5] = _evaluation(5, -1.0, exact=True, mate_in=2)
+
+    picked = _pick(Analysis(best_move=0, evaluations=ranked), skill=0)
+    assert picked == 6
+    assert picked != ranked[0].column, "safety promoted easy mode to perfect play"
+
+
+def test_a_won_position_is_still_won_at_the_easiest_setting():
+    """Floor 1 outranks everything above."""
+    ranked = [
+        _evaluation(2, 1.0, exact=True, mate_in=1),
+        _evaluation(3, 0.0),
+    ]
+    assert _pick(Analysis(best_move=2, evaluations=ranked), skill=0) == 2
+
+
+# --------------------------------------------------------------------------
+# Rematch
+# --------------------------------------------------------------------------
+
+
+def test_a_rematch_replays_the_archived_game_one_ply_short(client):
+    """The position worth thinking about again is the one before the mistake --
+    replaying the whole thing hands back a game that is already over."""
+    archived = finished_game(client)["game"]
+    record_id = archived["id"]
+
+    body = client.post(f"/api/history/{record_id}/rematch", json={}).json()
+
+    assert body["game"]["moves"] == archived["moves"][:-1]
+    assert body["game"]["status"] == "playing"
+    assert body["game"]["id"] != record_id, "a rematch is a new game"
+    assert body["replayed_from"] == record_id
+
+
+def test_a_rematch_inherits_colours_and_difficulty(client):
+    """Winning a rematch by quietly switching sides is not winning a rematch."""
+    archived = finished_game(client)["game"]
+    body = client.post(f"/api/history/{archived['id']}/rematch", json={}).json()
+
+    assert body["game"]["bot_player"] == archived["bot_player"]
+    assert body["game"]["skill"] == archived["skill"]
+
+
+def test_a_rematch_can_start_from_the_very_beginning(client):
+    archived = finished_game(client)["game"]
+    body = client.post(f"/api/history/{archived['id']}/rematch", json={"ply": 0}).json()
+    assert body["game"]["moves"] == []
+    assert body["replayed_plies"] == 0
+
+
+def test_a_rematch_of_the_whole_finished_game_is_refused(client):
+    """The one position a rematch cannot be played from."""
+    archived = finished_game(client)["game"]
+    response = client.post(
+        f"/api/history/{archived['id']}/rematch",
+        json={"ply": len(archived["moves"])},
+    )
+    assert response.status_code == 409
+
+
+def test_a_refused_rematch_leaves_no_game_behind(client):
+    """A 409 must not cost a slot in the store.
+
+    The store is capacity-bounded and evicts the oldest game to make room, so a
+    rejected rematch that still created a game would eventually throw away a
+    game somebody is playing to make room for one nobody can play.
+    """
+    archived = finished_game(client)["game"]
+    live = new_game(client)["game"]["id"]
+
+    for _ in range(MAX_GAMES + 1):
+        response = client.post(
+            f"/api/history/{archived['id']}/rematch",
+            json={"ply": len(archived["moves"])},
+        )
+        assert response.status_code == 409
+
+    assert client.get(f"/api/games/{live}").status_code == 200, (
+        "refused rematches evicted a live game"
+    )
+
+
+def test_a_drawn_game_is_refused_as_a_rematch_position_too(client):
+    """A full board is as finished as a won one, and was not being caught."""
+    drawn = [
+        0, 1, 0, 1, 0, 1,
+        1, 0, 1, 0, 1, 0,
+        2, 3, 2, 3, 2, 3,
+        3, 2, 3, 2, 3, 2,
+        4, 5, 4, 5, 4, 5,
+        5, 4, 5, 4, 5, 4,
+        6, 6, 6, 6, 6, 6,
+    ]
+    body = game_from(client, drawn)["game"]
+    assert body["status"] == "draw", "the fixture stopped being a drawn game"
+
+    response = client.post(
+        f"/api/history/{body['id']}/rematch", json={"ply": len(drawn)}
+    )
+    assert response.status_code == 409
+
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+
+def test_history_defaults_to_a_file_and_can_be_turned_off(monkeypatch):
+    """Unset, set, and set-but-empty are three different answers."""
+    monkeypatch.delenv("CONNECT4_HISTORY", raising=False)
+    assert _history_path() == ROOT / "data" / "games.jsonl"
+
+    monkeypatch.setenv("CONNECT4_HISTORY", "/somewhere/else.jsonl")
+    assert _history_path() == Path("/somewhere/else.jsonl")
+
+    # Empty means memory only. Path("") would write to the working directory,
+    # which is the least useful reading of "I do not want a file".
+    monkeypatch.setenv("CONNECT4_HISTORY", "   ")
+    assert _history_path() is None
+    assert GameHistory(_history_path()).path is None
+
+
+def test_a_rematch_of_an_unknown_game_is_a_404(client):
+    assert client.post("/api/history/nope/rematch", json={}).status_code == 404
+
+
+def test_a_negative_rematch_ply_is_rejected(client):
+    archived = finished_game(client)["game"]
+    response = client.post(f"/api/history/{archived['id']}/rematch", json={"ply": -1})
+    assert response.status_code == 422
+
+
+def test_a_rematch_of_a_corrupt_archive_line_is_refused_not_crashed(client):
+    """The archive is a file, and files arrive damaged.
+
+    ``Position.from_moves`` is the single authority on legality and it raises on
+    anything it rejects. A prefix of a game played through this API is always
+    legal, so the only way to reach that raise is a record this process did not
+    write -- the JSONL log can be hand-edited, truncated mid-write, or left
+    behind by an older version with a different notion of a legal move. Without
+    the refusal, one bad line turns every rematch of that record into a 500.
+
+    Eight stones in one column is the clearest example: six fit, and a rematch
+    replays all but the last ply, so seven of them still have to be refused.
+    """
+    record = client.app.state.history.record(
+        game_id="corrupt-line",
+        moves=[0, 0, 0, 0, 0, 0, 0, 0],
+        winner=0,
+        bot_player=2,
+        skill=3,
+        started=0.0,
+    )
+
+    response = client.post(f"/api/history/{record.id}/rematch", json={})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"], "a refusal should say what was wrong"
+
+
+def test_a_pick_with_nothing_scored_still_names_a_column():
+    """``_pick`` mirrors ``Engine.choose_move`` and has to mirror its fallback.
+
+    An analysis that scored nothing still carries a legal move, and answering -1
+    here is what the caller turns into "no legal move" for a board that has six.
+    """
+    starved = Analysis(best_move=4, evaluations=[], stats=SearchStats())
+    for skill in range(6):
+        assert _pick(starved, skill) == 4
