@@ -190,6 +190,39 @@ turn; `CONNECT4_WARM=0` turns it off. Measured in a real browser, from the click
 to the bot's stone appearing: **1.18-1.30s** on a cold server, **0.14-0.22s**
 once an opening has been seen before.
 
+### And a node costs less than it did
+
+The budget buys a fixed number of seconds; what those seconds are worth depends
+on how much searching fits inside them. Profiling one fixed-depth search said the
+time was going somewhere unglamorous -- a third of it inside the threat-map
+function, called nearly six times per node for a board that was not changing
+between the calls.
+
+Three fixes, all bookkeeping rather than cleverness:
+
+- **Remember the threat maps.** Every node asks for them two or three times over
+  -- once to filter out losing replies, once to rank the moves, once more at a
+  leaf by the evaluator -- and the answer cannot change while the board does not.
+- **Rank the moves only when a second one is actually wanted.** Ranking costs a
+  board and a threat map per column, and the transposition table's move usually
+  causes a cutoff on its own, so ranking the other six was work whose result was
+  thrown away. It now happens on demand, and one ply above the leaves not at all:
+  there, searching a child is cheaper than deciding which child to search first.
+- **Build each child position once.** The ranking built all of them and discarded
+  them; the search then rebuilt the one it wanted.
+
+Together, on ten benchmark positions: **27,000 to 69,000 nodes per second**, which
+buys one extra ply of search per second on nine of the ten. The play is not
+merely faster but stronger, and the answers did not drift: every column's score
+at every depth from 1 to 7, across those ten positions, is identical before and
+after. (One of the seventy ghost-piece lines now ends on a different but
+equally-valued move.)
+
+Two things were measured and rejected, which is the more useful half of the
+exercise: principal variation search cut the tree by 5.6% without moving the
+clock, and an unrolled threat map came in inside the noise. Neither was worth
+what it cost to read.
+
 ## Past games
 
 Finished games are appended to `data/games.jsonl` and shown under the History tab,
@@ -222,7 +255,7 @@ src/connect4/
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          264 tests
+tests/          306 tests
 ```
 
 ### Configuration
@@ -275,7 +308,7 @@ entirely. Accuracy alone would have hidden that completely.
 
 ```bash
 uv sync
-uv run python -m pytest              # 264 tests
+uv run python -m pytest              # 306 tests
 uv run python -m scripts.train       # downloads the data, trains, prints baselines
 uv run python -m scripts.validate    # the three experiments above
 uv run python -m connect4.api        # play

@@ -29,8 +29,9 @@ that flag. Presenting a guess as a proof would be the real failure here.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from operator import itemgetter
 
 from .bitboard import (
     HEIGHT,
@@ -52,6 +53,14 @@ MAX_PLIES = WIDTH * HEIGHT
 EXACT, LOWER_BOUND, UPPER_BOUND = 0, 1, 2
 
 Evaluator = Callable[[Position], float]
+
+# Sort key for move ordering, hoisted so the sort stays in C instead of
+# calling back into Python once per element.
+_threat_rank = itemgetter(0)
+
+# At or below this depth the children are leaves, and a leaf costs one call to
+# the evaluator -- less than working out which leaf to look at first.
+_ORDER_MIN_DEPTH = 1
 
 
 def heuristic_evaluator(pos: Position) -> float:
@@ -343,8 +352,8 @@ class Engine:
         best_score = -float("inf")
         best_col = -1
 
-        for col in self._ordered_moves(pos, playable, cached):
-            score = -self._negamax(pos.played(col), depth - 1, -beta, -alpha)
+        for col, child in self._ordered_moves(pos, playable, cached, depth):
+            score = -self._negamax(child, depth - 1, -beta, -alpha)
             if score > best_score:
                 best_score, best_col = score, col
             if best_score > alpha:
@@ -364,8 +373,10 @@ class Engine:
 
         return best_score
 
-    def _ordered_moves(self, pos: Position, playable: int, cached) -> list[int]:
-        """Order candidate moves so the best is tried first.
+    def _ordered_moves(
+        self, pos: Position, playable: int, cached, depth: int
+    ) -> Iterator[tuple[int, Position]]:
+        """Yield candidate moves best first, each with the position it leads to.
 
         Alpha-beta's saving depends almost entirely on ordering: with perfect
         ordering it examines the square root of the nodes that plain minimax
@@ -375,22 +386,50 @@ class Engine:
            transposition table). Shallow search is a good predictor of deep
            search, which is what makes iterative deepening pay for itself.
         2. Otherwise centre-out, plus a bonus for moves that create threats.
+
+        Signal 2 is not free: it costs a board and a threat map per column. Two
+        things follow, both of them measured rather than assumed.
+
+        When there is a table move it usually causes a cutoff on its own, so the
+        ranking is deferred until a second move is actually asked for -- and
+        never paid for when it is not. The order that comes out is exactly the
+        order sorting every column up front would have produced; only the moment
+        the work happens changes.
+
+        One ply above the leaves the ranking is skipped altogether, because
+        there "searching" a child is a single call to the evaluator, which is
+        cheaper than ranking it. That one *does* change the order: it costs a
+        fifth more nodes and buys about a quarter more nodes per second, which
+        on the benchmark positions came out a wash on nine and a ply deeper on
+        the tenth.
+
+        The child positions come back with the columns because the caller needs
+        them anyway, and building every board twice was pure waste.
         """
-        columns = [c for c in MOVE_ORDER if playable & pos._landing_bit(c)]
-
         table_move = cached[3] if cached else -1
-        opponent_wins = pos.opponent_winning_spots()
+        if table_move >= 0 and playable & pos._landing_bit(table_move):
+            yield table_move, pos.played(table_move)
 
-        def priority(col: int) -> tuple[int, int]:
-            if col == table_move:
-                return (-1, 0)
+        rest = [c for c in MOVE_ORDER if c != table_move and playable & pos._landing_bit(c)]
+        if not rest:
+            return
+        if len(rest) == 1 or depth <= _ORDER_MIN_DEPTH:
+            for col in rest:
+                yield col, pos.played(col)
+            return
+
+        opponent_wins = pos.opponent_winning_spots()
+        ranked = []
+        for col in rest:
             child = pos.played(col)
             # More threats created is better; giving the opponent threats is worse.
             created = popcount(child.opponent_winning_spots() & ~opponent_wins)
-            return (0, -created)
-
-        columns.sort(key=priority)
-        return columns
+            ranked.append((-created, col, child))
+        # Keyed on the threat count alone, so columns that create equally many
+        # threats keep their centre-out order.
+        ranked.sort(key=_threat_rank)
+        for _, col, child in ranked:
+            yield col, child
 
     def _extract_pv(self, pos: Position, first_move: int, limit: int = 8) -> list[int]:
         """Walk the transposition table to recover the expected line of play.

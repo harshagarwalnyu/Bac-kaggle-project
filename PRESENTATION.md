@@ -384,6 +384,26 @@ Go **bottom-up**. Each layer only makes sense once the one below it exists.
   from the last finished depth, never a half-updated one.
 - **Move ordering** — centre-first, then the transposition table's best move.
   Ordering is what makes alpha-beta actually cut.
+- **The 2.5x came from a profiler, not from cleverness** — this is the one to
+  tell as a story. The profile of a single fixed-depth search said a third of
+  the time was inside the threat-map function, called ~6 times per node for a
+  board that never changed between calls. Three fixes: **remember the threat
+  maps** on the position (every node asks two or three times: the move filter,
+  the ordering, the leaf evaluator); **rank moves lazily**, because the table
+  move usually cuts off on its own and ranking the other six columns costs a
+  board and a threat map each; and **build each child once** instead of once
+  for ranking and again for the search. **27k -> 69k nodes/second, one extra
+  ply per second on nine of ten benchmark positions.**
+  - **The claim that makes it safe:** every column's score at every depth from
+    1 to 7 on those ten positions is **identical before and after**. Root
+    children are searched with a full window, so those numbers are true values
+    -- an ordering change cannot move one without it being a bug.
+  - **What was rejected, with numbers** (worth volunteering): principal
+    variation search cut the tree 5.6% and the clock not at all; an unrolled
+    threat map landed inside the measurement noise. Also worth saying: the
+    first micro-benchmarks were wrong, because whichever candidate ran last
+    came out ~60% slower regardless of which one it was. Interleaving the
+    candidates and taking the minimum fixed it.
 
 ### `src/connect4/dataset.py` — section 2 above.
 

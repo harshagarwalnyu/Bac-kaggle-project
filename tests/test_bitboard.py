@@ -404,3 +404,84 @@ def test_draw_detection_on_a_full_board():
             pos.play(col)
     assert pos.moves == WIDTH * HEIGHT
     assert pos.is_draw()
+
+
+# --------------------------------------------------------------------------
+# Remembered threat maps
+# --------------------------------------------------------------------------
+
+
+def _fresh(pos: Position) -> Position:
+    """The same board, with nothing remembered about it."""
+    return Position(pos.position, pos.mask, pos.moves)
+
+
+def test_playing_a_stone_forgets_the_remembered_threat_maps():
+    """The classic failure mode of a cache on a mutable object: a stale answer.
+
+    ``play`` mutates in place, so both maps have to be dropped -- and the way to
+    prove it is to ask *before* the move, which is what fills them.
+    """
+    pos = Position.from_moves([3, 2, 3, 4])
+    pos.winning_spots()
+    pos.opponent_winning_spots()
+
+    pos.play(3)
+
+    clean = _fresh(pos)
+    assert pos.winning_spots() == clean.winning_spots()
+    assert pos.opponent_winning_spots() == clean.opponent_winning_spots()
+
+
+def test_a_remembered_map_does_not_change_what_a_position_is():
+    """Two identical boards stay equal even if only one has been asked.
+
+    The maps are a consequence of the board rather than part of it, so they are
+    excluded from equality. Were they not, a position would stop being equal to
+    itself halfway through a search.
+    """
+    asked = Position.from_moves([3, 3, 4])
+    untouched = Position.from_moves([3, 3, 4])
+    asked.winning_spots()
+    asked.opponent_winning_spots()
+    assert asked == untouched
+    assert repr(asked) == repr(untouched)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_remembered_maps_agree_with_a_fresh_position(seed):
+    """Differential test for the cache: same board, same answer, always.
+
+    Every position reached along a random game is asked for both maps twice --
+    once as it stands, having already answered other questions during play, and
+    once as a position that has never been asked anything.
+    """
+    rng = random.Random(5000 + seed)
+    for _ in range(60):
+        pos = _random_position(rng)
+        clean = _fresh(pos)
+        assert pos.winning_spots() == clean.winning_spots(), f"\n{pos}"
+        assert pos.opponent_winning_spots() == clean.opponent_winning_spots(), f"\n{pos}"
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_played_agrees_with_copy_then_play(seed):
+    """``played`` spells the move arithmetic out for speed; it must not drift.
+
+    It is the one place in this file where the same rule is written twice, so it
+    is the one place that needs a test whose only job is to compare the two.
+    """
+    rng = random.Random(9000 + seed)
+    for _ in range(60):
+        pos = _random_position(rng)
+        if pos.has_won():
+            continue
+        for col in pos.legal_moves():
+            stepwise = pos.copy()
+            stepwise.play(col)
+            direct = pos.played(col)
+            assert (direct.position, direct.mask, direct.moves) == (
+                stepwise.position,
+                stepwise.mask,
+                stepwise.moves,
+            ), f"column {col}\n{pos}"
