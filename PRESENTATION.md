@@ -323,8 +323,12 @@ Have it running before you start: `uv run python -m connect4.api`.
    - **The honest caveat lands well:** it does **not** claim a solve from the
      empty board. Connect 4 is solved — the first player wins by move 41 — but
      proving that takes billions of nodes, and CPython is not doing that inside a
-     web request. From roughly the eighth stone onward the search *does* resolve
-     whole lines exactly, and the UI lights the `proven` badge **only** where it
+     web request. Measured over a full game at the solver's own settings,
+     the first fully resolved position — every legal column proven — comes
+     at **fourteen stones**, and from there on nearly every ply is exact, most
+     in under a second once the persistent table holds the sub-positions.
+     Earlier it is partial and erratic: 4/7 columns at seven stones, 0/7 at
+     eight. The UI lights the `proven` badge per column, **only** where it
      genuinely did. Overclaiming a solve would be the one dishonest thing this
      project could ship.
 10. **History tab.** Finished games with a win/loss/draw record, replayable.

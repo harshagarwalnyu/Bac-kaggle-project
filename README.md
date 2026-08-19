@@ -145,10 +145,16 @@ each move into a continuation of the last rather than a fresh start. Entries are
 keyed by position, not by search, so the reuse is sound.
 
 It does **not** claim a solve from the empty board — proving that takes billions of
-nodes, which CPython is not going to do inside a web request. From roughly the
-eighth stone onward the search does resolve whole lines exactly, and the UI lights
-the `proven` badge only where it genuinely did. The mode also carries a banner
-saying plainly that the dataset network is out of the driving seat here. Claiming
+nodes, which CPython is not going to do inside a web request. Walking a full game
+under the solver's own settings, the first position it resolves completely —
+every legal column carrying a proven score — arrives at **fourteen stones**,
+and from there to the end every ply but one comes back fully proven, most of
+them in well under a second, because the persistent table has already seen the
+sub-positions. Before fourteen it is partial and not monotonic: four of seven
+columns proven at seven stones, none at eight. The UI lights the `proven` badge
+per column, only where the search genuinely resolved that column. The mode also
+carries a banner saying plainly that the dataset network is out of the driving
+seat here. Claiming
 a solve we did not compute would be the one dishonest thing this project could
 ship.
 
