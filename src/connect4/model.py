@@ -26,13 +26,13 @@ All arrays are ``float32`` and batch-first: ``a`` has shape ``(batch, units)``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
 
 from .bitboard import Position
 from .dataset import LABELS, N_FEATURES, encode
-
 
 # --------------------------------------------------------------------------
 # Primitives
@@ -106,7 +106,7 @@ class MLP:
         self.layer_sizes = layer_sizes
         self.layers: list[Layer] = []
 
-        for fan_in, fan_out in zip(layer_sizes[:-1], layer_sizes[1:]):
+        for fan_in, fan_out in pairwise(layer_sizes):
             # He initialisation: variance 2/fan_in. ReLU zeroes half its inputs,
             # halving the variance of each layer's output; the factor of 2
             # compensates, so activations neither vanish nor explode with depth.

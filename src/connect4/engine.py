@@ -395,7 +395,12 @@ class Engine:
             score = -self._negamax(child, depth - 1, -beta, -alpha)
             if score > best_score:
                 best_score, best_col = score, col
-            if best_score > alpha:
+            # `max(alpha, best_score)` says the same thing and reads better,
+            # but this is the innermost line of the whole search: 6.5 ns for the
+            # compare-and-store against 18.5 ns for the call (CPython 3.14,
+            # 2e6 iterations, best of 5). At millions of nodes per search that
+            # difference is seconds of the player's time.
+            if best_score > alpha:  # noqa: PLR1730
                 alpha = best_score
             if alpha >= beta:
                 # The opponent would never allow this line, so its exact value

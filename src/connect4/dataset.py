@@ -318,8 +318,8 @@ def stratified_split(
         rng.shuffle(indices)
 
         n = len(indices)
-        n_val = int(round(n * val_fraction))
-        n_test = int(round(n * test_fraction))
+        n_val = round(n * val_fraction)
+        n_test = round(n * test_fraction)
 
         splits["val"].append(indices[:n_val])
         splits["test"].append(indices[n_val : n_val + n_test])

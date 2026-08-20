@@ -15,6 +15,9 @@ dependencies = [
 dev = [
     "pytest>=9.1",
     "pytest-cov>=7.0",
+    # Pinned to a minor: ruff adds rules in every release, and a lint that
+    # starts failing because the tool moved is a lint nobody trusts.
+    "ruff>=0.16.3,<0.17",
 ]
 
 [build-system]

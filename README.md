@@ -1,5 +1,7 @@
 # Connect 4 — a glass-box bot
 
+[![tests](https://github.com/harshagarwalnyu/Bac-kaggle-project/actions/workflows/tests.yml/badge.svg)](https://github.com/harshagarwalnyu/Bac-kaggle-project/actions/workflows/tests.yml)
+
 A Connect 4 bot you can play in the browser, built on the
 [UCI `connect-4` opening database](https://archive.ics.uci.edu/dataset/26/connect+4)
 (67,557 legal 8-ply positions, each labelled with its perfect-play outcome by John
@@ -273,6 +275,7 @@ web/tests/      32 front-end tests; no dependencies, no build step
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
 tests/          348 tests
+.github/        the workflow that runs both suites on every push
 ```
 
 ### Configuration
@@ -334,7 +337,8 @@ entirely. Accuracy alone would have hidden that completely.
 ## Reproducing
 
 ```bash
-uv sync
+uv sync --extra dev
+uv run ruff check .                        # lint
 uv run python -m pytest                    # 348 tests
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
@@ -343,3 +347,8 @@ uv run python -m connect4.api              # play
 ```
 
 The dataset is fetched from the UCI archive on first run; nothing needs a Kaggle account.
+
+Those first three lines are exactly what CI runs on every push and pull request
+([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) — the python suite on
+3.14, the front-end suite on node 20 and 24. There is no step in CI that you cannot
+run yourself, and no step here that CI skips.
