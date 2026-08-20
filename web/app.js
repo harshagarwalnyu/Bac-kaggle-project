@@ -80,14 +80,16 @@ const post = (path, body) =>
 
 async function newGame() {
   const botFirst = el.botFirst.checked;
-  await withBusy(async () => {
+  const started = await withBusy(async () => {
     const data = await post("/api/games", {
       skill: Number(el.skill.value),
       bot_first: botFirst,
     });
     absorb(data);
   });
-  if (botFirst) await botMove();
+  // If the server refused to start one, `state.game` is still the *old* game.
+  // Opening for a game that does not exist would drop a stone into it.
+  if (started && botFirst) await botMove();
 }
 
 async function playColumn(column) {
@@ -96,9 +98,14 @@ async function playColumn(column) {
   if (state.game.turn !== humanPlayer()) return;
   if (!state.game.legal_moves.includes(column)) return;
 
-  await withBusy(async () => {
+  const played = await withBusy(async () => {
     absorb(await post(`/api/games/${state.game.id}/moves`, { column }));
   });
+
+  // A refused move leaves the turn where it was: mine. Answering it anyway
+  // would let the bot take a free move off a click the server rejected, and
+  // its successful reply would wipe the message explaining the refusal.
+  if (!played) return;
 
   if (state.game.status === "playing") await botMove();
   else await loadHistory();
@@ -147,15 +154,23 @@ async function clearHistory() {
   await loadHistory();
 }
 
-/** Run `work` with input locked, and turn any failure into a visible message. */
+/**
+ * Run `work` with input locked, and turn any failure into a visible message.
+ *
+ * Returns whether the work got through. Callers chain requests -- a move is
+ * followed by the bot's reply -- and a chain that ignores the first failure
+ * makes the second request about a position that never happened.
+ */
 async function withBusy(work) {
   state.busy = true;
   render();
   try {
     await work();
     state.message = "";
+    return true;
   } catch (error) {
     state.message = String(error.message ?? error);
+    return false;
   } finally {
     state.busy = false;
     render();
@@ -181,6 +196,19 @@ const humanPlayer = () => (state.game.bot_player === 1 ? 2 : 1);
  * have to be chosen from the role rather than from the seat.
  */
 const sideClass = (player) => (player === humanPlayer() ? "you" : "bot");
+
+/**
+ * Whose move it is, with a finished game answered honestly.
+ *
+ * The server reports `turn: 0` once a game is won or drawn, because nobody is
+ * to move. `sideClass` has no colour for player 0 -- it has no colour for
+ * anyone but the human -- so asking it directly paints *everything* in the
+ * bot's red. The legend is the visible casualty: its two example keys go the
+ * same colour and stop distinguishing the marks they exist to explain. With no
+ * variation left to draw, the plain reading is the right one: mark one is mine.
+ */
+const sideToMove = () =>
+  state.game.status === "playing" ? state.game.turn : humanPlayer();
 const solverMode = () => Number(el.skill.value) >= SOLVER_SKILL;
 const myTurn = () =>
   state.game && state.game.status === "playing" && state.game.turn === humanPlayer();
@@ -229,8 +257,8 @@ function render() {
   // side to move. That is me most of the time, but not while the bot is
   // thinking -- and the bot thinks for twelve seconds in solver mode, which is
   // long enough to read a legend that disagrees with the board.
-  el.ghostKeyNext.className = `ghost-key ${sideClass(state.game.turn)}`;
-  el.ghostKeyReply.className = `ghost-key ${sideClass(3 - state.game.turn)}`;
+  el.ghostKeyNext.className = `ghost-key ${sideClass(sideToMove())}`;
+  el.ghostKeyReply.className = `ghost-key ${sideClass(3 - sideToMove())}`;
 }
 
 function renderStatus() {
