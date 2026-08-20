@@ -1,0 +1,30 @@
+{
+  "games": 8,
+  "simulations": 200,
+  "engine_time": 1.0,
+  "checkpoints": {
+    "checkpoints\\az\\champion.pt": {
+      "random": {
+        "wins": 8,
+        "draws": 0,
+        "losses": 0,
+        "score": 1.0,
+        "seconds": 6.1
+      },
+      "uniform-search": {
+        "wins": 8,
+        "draws": 0,
+        "losses": 0,
+        "score": 1.0,
+        "seconds": 11.8
+      },
+      "engine-solver": {
+        "wins": 1,
+        "draws": 2,
+        "losses": 5,
+        "score": 0.25,
+        "seconds": 706.7
+      }
+    }
+  }
+}

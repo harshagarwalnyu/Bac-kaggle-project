@@ -323,7 +323,7 @@ scripts/validate.py  the experiments above
 scripts/az_pretrain.py  warm-starts the value head on solver-exact labels
 scripts/train_az.py     the self-play loop: play, learn, gate, promote
 scripts/az_arena.py     grades a checkpoint against fixed opponents
-tests/          482 tests (436 without the optional `az` extra)
+tests/          484 tests (436 without the optional `az` extra)
 .github/        the workflow that runs both suites on every push
 ```
 
@@ -455,7 +455,20 @@ learned player is competitive with difficulty 5, not past it.
 **Skill 6 is not a skill number.** `Engine.choose_move` branches on `skill >= 5`,
 so asking the arena for skill 6 returns the skill 5 player under a different
 label. Difficulty 6 is an *engine*: twelve times the clock and a transposition
-table that survives between moves. `--solver` is what builds it.
+table that survives between moves. `--solver` is what builds it — and against
+that, the real one, the network **loses**:
+
+| opponent | score | record |
+|---|---|---|
+| solver mode (12s a move, persistent table) | 0.250 | 1-2-5 |
+
+That is the result to quote. Twenty iterations of self-play on eight CPU cores
+produced a 59,834-parameter network that outplays the heuristic evaluator at
+every difficulty below 5, draws level with it at difficulty 5 on an equal
+clock, and is still comfortably beaten by the same evaluator given twelve
+times the thinking time and a table it can keep. Search budget is doing more
+work here than representation, which is the honest reading of a small net
+trained for 24 minutes.
 
 ## The model
 
@@ -478,7 +491,7 @@ entirely. Accuracy alone would have hidden that completely.
 ```bash
 uv sync --extra dev
 uv run ruff check .                        # lint
-uv run python -m pytest                    # 482 tests (436 without --extra az)
+uv run python -m pytest                    # 484 tests (436 without --extra az)
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
 uv run python -m scripts.validate          # the three experiments above
