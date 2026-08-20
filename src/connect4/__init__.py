@@ -8,7 +8,10 @@ trained from scratch on the UCI connect-4 opening database.
 from .bitboard import HEIGHT, WIDTH, Position
 from .engine import Analysis, Engine, MoveEvaluation, SearchStats, heuristic_evaluator
 
-__all__ = [
+# Grouped to mirror the two imports above -- board vocabulary first, then the
+# search -- which is the order a reader meets them in. Alphabetical would
+# interleave the two and say nothing.
+__all__ = [  # noqa: RUF022
     "HEIGHT",
     "WIDTH",
     "Position",

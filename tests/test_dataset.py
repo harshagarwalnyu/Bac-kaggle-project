@@ -20,8 +20,8 @@ import pytest
 
 from connect4.bitboard import HEIGHT, WIDTH, Position, popcount
 from connect4.dataset import (
-    LABELS,
     LABEL_TO_INDEX,
+    LABELS,
     N_FEATURES,
     RAW_FEATURES,
     encode,

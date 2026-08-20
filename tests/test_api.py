@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from connect4.api import (
@@ -434,8 +435,12 @@ def test_the_store_evicts_the_oldest_game_rather_than_growing_forever():
         store.create(skill=5, bot_player=2)
 
     assert len(store._games) == 3
-    with pytest.raises(Exception):  # HTTPException(404)
+    # Naming the exception matters: `pytest.raises(Exception)` also passes when
+    # `store.get` raises an AttributeError from a typo, which is the opposite of
+    # what this test claims to prove.
+    with pytest.raises(HTTPException) as evicted:
         store.get(first.id)
+    assert evicted.value.status_code == 404
 
 
 def test_the_default_capacity_is_a_bound_not_a_suggestion():

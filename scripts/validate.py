@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from connect4.bitboard import Position
-from connect4.dataset import LABELS, LABEL_TO_INDEX, ensure_raw_data, load_samples
+from connect4.dataset import LABEL_TO_INDEX, LABELS, ensure_raw_data, load_samples
 from connect4.engine import Engine, heuristic_evaluator
 from connect4.model import MLP, NeuralEvaluator
 
@@ -85,7 +85,7 @@ def score_positions(name: str, predict, positions, labels) -> dict:
         "name": name,
         "three_class_accuracy": float((predictions == labels).mean()),
         "decisive_accuracy": float(sign_correct.mean()),
-        "n": int(len(labels)),
+        "n": len(labels),
         "n_decisive": int(decisive.sum()),
         "seconds": elapsed,
         "predicted_draw_rate": float((predictions == LABEL_TO_INDEX["draw"]).mean()),

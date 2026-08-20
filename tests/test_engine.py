@@ -290,7 +290,7 @@ def test_concurrent_searches_do_not_corrupt_each_other():
     def search(moves):
         try:
             results.append(engine.analyse(Position.from_moves(moves)))
-        except Exception as error:  # pragma: no cover - the failure being tested
+        except Exception as error:  # noqa: BLE001  # pragma: no cover - any escape fails
             errors.append(error)
 
     threads = [

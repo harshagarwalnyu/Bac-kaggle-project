@@ -1,0 +1,77 @@
+# Every claim this project makes is checked here, on every push.
+#
+# Two jobs rather than one, because the two suites fail for unrelated reasons:
+# when the badge goes red it should already say whether the engine broke or the
+# page did. Neither job needs a service, a database or a secret -- the trained
+# model is committed and the front-end tests bring their own server.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only: nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+# A branch that gets two pushes a minute apart should test the second one, not
+# both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the project declares, and nothing above it yet: 3.14 is the
+        # current release and `requires-python` excludes 3.15.
+        python: ["3.14"]
+    # Job-level, so `uv run` in the later steps resolves the same interpreter
+    # `uv sync` built the environment with instead of quietly re-syncing.
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Exact version, not a major: setup-uv stopped publishing the moving
+      # `vN` tag after v7, so `@v10` does not resolve.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the project and its dev tools
+        run: uv sync --extra dev --frozen
+
+      # Lint first: it takes a second and it fails for reasons a diff can fix.
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest
+
+  web:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The front end has no build step and no dependencies, so the only
+        # thing worth proving is that it still runs on the oldest node with a
+        # stable `node --test`, as well as on current LTS.
+        node: ["20", "24"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Test
+        run: node --test web/tests/app.test.js
