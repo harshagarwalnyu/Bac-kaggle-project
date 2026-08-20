@@ -269,7 +269,7 @@ src/connect4/
   history.py    append-only JSONL archive of finished games
   api.py        FastAPI; a game is stored as its move list, not as a board
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
-web/tests/      31 front-end tests; no dependencies, no build step
+web/tests/      32 front-end tests; no dependencies, no build step
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
 tests/          348 tests
@@ -336,7 +336,7 @@ entirely. Accuracy alone would have hidden that completely.
 ```bash
 uv sync
 uv run python -m pytest                    # 348 tests
-node --test web/tests/app.test.js          # 31 front-end tests, no npm install
+node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
 uv run python -m scripts.validate          # the three experiments above
 uv run python -m connect4.api              # play
