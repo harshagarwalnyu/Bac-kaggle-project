@@ -269,6 +269,7 @@ src/connect4/
   history.py    append-only JSONL archive of finished games
   api.py        FastAPI; a game is stored as its move list, not as a board
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
+web/tests/      31 front-end tests; no dependencies, no build step
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
 tests/          348 tests
@@ -304,6 +305,16 @@ against central differences in float64, with and without weight decay. That is t
 only honest proof a hand-written backprop is correct, and it is the reason I can
 claim to understand every line of the training code.
 
+**The page says what the board says.** `web/tests/` runs `web/app.js` itself —
+boot path included — against a stub DOM and a fake server that answers in the
+shapes `api.py` really sends, `turn: 0` on a finished game included. It needs no
+npm install and no browser: `node --test web/tests/app.test.js`. Three defects
+were found this way and are now regression tests: stones coloured by seat rather
+than by role (so a bot-first game handed the bot the human's yellow), a legend
+whose colour keys contradicted the marks they explained, and a refused move that
+still let the bot reply — costing a tempo and wiping the error message that
+explained the refusal.
+
 ## The model
 
 `(98 → 128 → 64 → 3)`, ≈21k parameters. He init, ReLU, numerically stable softmax,
@@ -324,10 +335,11 @@ entirely. Accuracy alone would have hidden that completely.
 
 ```bash
 uv sync
-uv run python -m pytest              # 348 tests
-uv run python -m scripts.train       # downloads the data, trains, prints baselines
-uv run python -m scripts.validate    # the three experiments above
-uv run python -m connect4.api        # play
+uv run python -m pytest                    # 348 tests
+node --test web/tests/app.test.js          # 31 front-end tests, no npm install
+uv run python -m scripts.train             # downloads the data, trains, prints baselines
+uv run python -m scripts.validate          # the three experiments above
+uv run python -m connect4.api              # play
 ```
 
 The dataset is fetched from the UCI archive on first run; nothing needs a Kaggle account.
