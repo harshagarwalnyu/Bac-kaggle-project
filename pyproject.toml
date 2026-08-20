@@ -19,6 +19,9 @@ dev = [
     # starts failing because the tool moved is a lint nobody trusts.
     "ruff>=0.16.3,<0.17",
 ]
+az = [
+    "torch>=2.6",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -30,6 +33,10 @@ packages = ["src/connect4"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# The repository root, so `tests/` can import the `scripts/` entry points. The
+# package itself is installed and does not need this; the scripts are not a
+# package and are not meant to be.
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["src/connect4"]

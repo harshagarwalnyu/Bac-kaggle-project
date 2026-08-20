@@ -19,6 +19,12 @@ data/raw/
 # small model IS committed so the app runs without retraining.
 models/*.tmp
 
+# AlphaZero run state. The promoted champion is worth committing -- it is a
+# quarter of a megabyte and it is the artefact -- but the per-iteration
+# challenger and the append-only log are run scratch.
+checkpoints/*/challenger.pt
+checkpoints/*/training_log.jsonl
+
 # Local game log. It is one player's session history, not project source.
 data/games.jsonl
 

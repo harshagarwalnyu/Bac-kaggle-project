@@ -314,11 +314,16 @@ src/connect4/
   model.py      MLP written from scratch in NumPy — forward, backward, Adam
   history.py    append-only JSONL archive of finished games
   api.py        FastAPI; a game is stored as its move list, not as a board
+  az/           AlphaZero: PUCT search, policy-value net, self-play, arena
+                (the only torch code in the project, and an optional extra)
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 web/tests/      32 front-end tests; no dependencies, no build step
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          348 tests
+scripts/az_pretrain.py  warm-starts the value head on solver-exact labels
+scripts/train_az.py     the self-play loop: play, learn, gate, promote
+scripts/az_arena.py     grades a checkpoint against fixed opponents
+tests/          455 tests (409 without the optional `az` extra)
 .github/        the workflow that runs both suites on every push
 ```
 
@@ -362,6 +367,61 @@ whose colour keys contradicted the marks they explained, and a refused move that
 still let the bot reply — costing a tempo and wiping the error message that
 explained the refusal.
 
+## AlphaZero mode (`connect4.az`)
+
+The MLP above is a *classifier*. It reads a position and predicts the
+game-theoretic result, and the front end draws it as blue bars — but it does not
+choose moves. Every move the shipped bot plays comes from alpha-beta with a
+hand-written evaluator. That is the honest state of the project, and it is the
+gap this package closes.
+
+`src/connect4/az/` is a self-contained AlphaZero implementation: a policy-value
+network, PUCT search that uses the policy as a prior and the value in place of a
+rollout, and a self-play loop that trains on the search's own visit counts.
+
+**The framework rule changed here, deliberately.** `connect4.model` is a
+hand-written NumPy MLP because a small dense classifier is genuinely legible
+when you write the backward pass yourself. A residual convolutional tower
+trained by self-play is not that; hand-rolling conv backprop would teach nobody
+anything and would very likely be subtly wrong. So this package uses PyTorch,
+as an **optional extra**. Playing a game against the shipped bot still needs
+neither torch nor any of these files.
+
+```bash
+uv sync --extra az
+uv run python -m scripts.az_pretrain                     # warm-start the value head
+uv run python -m scripts.train_az --iterations 20        # self-play
+uv run python -m scripts.az_arena checkpoints/az/champion.pt
+```
+
+**Sized for the machine, not for the paper.** AlphaGo Zero used 20 residual
+blocks of 256 filters. The default here is 3 blocks of 32 — about 60k
+parameters — because on an 8-core CPU the bottleneck is not capacity, it is how
+many self-play games per hour the network can generate. Measured on a batch of
+128 boards, best of 15: 64×4 gives 5,479 boards/s, 32×3 gives 17,943. Going
+wider costs 3.3× the time for 5× the parameters, and that time is games not
+played.
+
+**The gate is the whole safety mechanism.** Each iteration trains a challenger,
+plays it against the reigning champion over a book of forced openings from both
+seats, and promotes only on a score of 0.55 or better. Training loss is *not*
+evidence of strength here — it is measured against targets the network's own
+search produced, so it says how self-consistent the network is and nothing
+about whether it plays better. `scripts/az_arena.py` reports the number that
+does mean something: the score against the shipped alpha-beta engine at each
+skill level, plus a *uniform-search* control that runs the same MCTS with a
+network that knows nothing. That control is what separates what the network
+contributed from what the search contributed.
+
+**The warm start uses real labels, and only where they apply.** The UCI file is
+67,557 positions with solver-exact outcomes, so `scripts/az_pretrain.py` fits
+the value head to them before self-play begins. It does **not** touch the policy
+head: the file says who wins, not which move to play, so there is no policy
+target in it and inventing one would defeat the point of using real data. On the
+run recorded here it took validation MSE from 0.731 (predict the mean) to 0.188,
+with 94% sign agreement on decisive positions. The trunk is shared, so the
+policy head still starts from a representation that has seen exact labels.
+
 ## The model
 
 `(98 → 128 → 64 → 3)`, ≈21k parameters. He init, ReLU, numerically stable softmax,
@@ -383,7 +443,7 @@ entirely. Accuracy alone would have hidden that completely.
 ```bash
 uv sync --extra dev
 uv run ruff check .                        # lint
-uv run python -m pytest                    # 348 tests
+uv run python -m pytest                    # 455 tests (409 without --extra az)
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
 uv run python -m scripts.validate          # the three experiments above

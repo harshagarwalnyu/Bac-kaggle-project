@@ -1,0 +1,179 @@
+"""Grading: does the new network actually beat the old one?
+
+Self-play training has a well-known failure mode where the loss goes down every
+iteration and the player gets worse. The loss is measured against targets the
+network's own search produced, so it says how consistent the network is with
+itself and nothing whatsoever about strength. The only honest measure is games.
+
+This project is unusually well placed to run them. It already contains a
+bitboard alpha-beta search with a difficulty dial and, at level 6, something
+close to perfect play -- so a network can be graded against a *fixed, known*
+opponent rather than only against its own history. That is the difference
+between "iteration 40 beats iteration 30" and "iteration 40 beats a solver".
+
+**Openings are forced.** Two deterministic players meet in one game, replayed
+however many times you schedule. Sixty games of the same game is not sixty games
+of evidence. Each pairing is therefore seeded with a distinct opening and played
+from both sides, which is the same trick ``scripts/tournament.py`` uses.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
+
+from connect4.bitboard import WIDTH, Position
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
+class Player(Protocol):
+    """Anything that can pick moves for several independent positions at once.
+
+    Batched by design. A network player wants to evaluate many boards in one
+    forward pass, and a one-position interface would make an arena run cost
+    several times what it needs to. Players with nothing to batch simply loop.
+    """
+
+    def choose_moves(self, positions: Sequence[Position]) -> list[int]: ...
+
+
+@dataclass(slots=True)
+class Record:
+    """Results from the first player's point of view."""
+
+    wins: int = 0
+    draws: int = 0
+    losses: int = 0
+
+    @property
+    def played(self) -> int:
+        return self.wins + self.draws + self.losses
+
+    @property
+    def score(self) -> float:
+        """Points per game, draws counting a half. 0.5 is a dead heat."""
+        return (self.wins + 0.5 * self.draws) / self.played if self.played else 0.0
+
+    def __str__(self) -> str:
+        return f"{self.wins}W {self.draws}D {self.losses}L (score {self.score:.3f})"
+
+
+def openings(count: int, plies: int = 2) -> list[list[int]]:
+    """Distinct opening move sequences, centre-first.
+
+    Centre-first because the openings should be positions a real game might
+    reach: starting every test game with a1 would measure how the two players
+    handle nonsense rather than how they play. Column 3 is Connect 4's only
+    winning first move, and the order fans out from it.
+    """
+    order = sorted(range(WIDTH), key=lambda c: abs(c - WIDTH // 2))
+    if plies <= 1:
+        return [[c] for c in order[:count]]
+    pairs = [[a, b] for a in order for b in order]
+    return pairs[:count]
+
+
+def play_games(
+    first: Player,
+    second: Player,
+    lines: Sequence[Sequence[int]],
+) -> Record:
+    """Play one game per opening, ``first`` moving first in all of them.
+
+    Games advance in lockstep and every player is asked for all of its moves in
+    one call, so a network player sees a wide batch rather than a trickle.
+    """
+    boards = [Position.from_moves(line) for line in lines]
+    # Which ply parity belongs to ``first``. It is *not* always zero: an opening
+    # of odd length hands the move to ``first`` on odd plies. Deriving this per
+    # game rather than assuming an even-length opening is the difference between
+    # a correct scoreboard and a silently inverted one.
+    first_parity = [len(line) % 2 for line in lines]
+    done = [board.has_won() or board.is_draw() for board in boards]
+
+    while not all(done):
+        pending = [i for i, over in enumerate(done) if not over]
+        for player, is_first in ((first, True), (second, False)):
+            group = [
+                i
+                for i in pending
+                if not done[i] and (boards[i].moves % 2 == first_parity[i]) is is_first
+            ]
+            if not group:
+                continue
+            moves = player.choose_moves([boards[i] for i in group])
+            for i, column in zip(group, moves, strict=True):
+                boards[i] = boards[i].played(column)
+                done[i] = boards[i].has_won() or boards[i].is_draw()
+
+    record = Record()
+    for i, board in enumerate(boards):
+        if not board.has_won():
+            record.draws += 1
+        # The game ended on a winning move, so whoever is *to move* is the one
+        # who lost. ``first`` is to move exactly when the parity matches.
+        elif board.moves % 2 == first_parity[i]:
+            record.losses += 1
+        else:
+            record.wins += 1
+    return record
+
+
+def match(
+    challenger: Player,
+    champion: Player,
+    games: int = 40,
+    opening_plies: int = 2,
+) -> Record:
+    """A full match with colours alternated, from the challenger's point of view.
+
+    Half the games are played with each side moving first, because Connect 4 is
+    a first-player win with perfect play and a match that did not alternate
+    would mostly be measuring who got the better seat.
+    """
+    half = max(games // 2, 1)
+    lines = openings(half, opening_plies)
+
+    record = play_games(challenger, champion, lines)
+    reversed_record = play_games(champion, challenger, lines)
+    # The second half is from the champion's point of view; flip it.
+    record.wins += reversed_record.losses
+    record.losses += reversed_record.wins
+    record.draws += reversed_record.draws
+    return record
+
+
+class EnginePlayer:
+    """Adapts :class:`connect4.engine.Engine` to the :class:`Player` protocol.
+
+    Loops rather than batches, because alpha-beta has nothing to batch. Kept
+    here so an arena can be pointed at the shipped bot -- the fixed reference
+    this whole exercise is trying to catch up with.
+    """
+
+    __slots__ = ("engine", "skill")
+
+    def __init__(self, engine, skill: int = 5) -> None:
+        self.engine = engine
+        self.skill = skill
+
+    def choose_moves(self, positions: Sequence[Position]) -> list[int]:
+        return [self.engine.choose_move(p, self.skill) for p in positions]
+
+
+class RandomPlayer:
+    """Plays legally and otherwise thoughtlessly. The floor any player must clear.
+
+    Worth keeping around: an untrained network with a broken sign convention can
+    look plausible against another copy of itself, and will lose to this.
+    """
+
+    __slots__ = ("rng",)
+
+    def __init__(self, rng) -> None:
+        self.rng = rng
+
+    def choose_moves(self, positions: Sequence[Position]) -> list[int]:
+        return [int(self.rng.choice(p.legal_moves())) for p in positions]
