@@ -553,3 +553,55 @@ def test_our_move_can_never_hand_the_opponent_a_new_threat(seed):
             after = pos.played(col).winning_spots()
             assert not after & ~theirs, f"column {col} created a threat\n{pos}"
             assert after == theirs & ~pos._landing_bit(col) or after == theirs
+
+
+# --------------------------------------------------------------------------
+# The mask accessors and the debug rendering
+# --------------------------------------------------------------------------
+
+
+def test_bottom_mask_is_the_cell_a_first_drop_fills():
+    """These three accessors wrap precomputed tuples, so the risk is an off-by-one
+    in the stride -- which a lookup table hides until something reads it."""
+    for col in range(WIDTH):
+        pos = Position()
+        pos.play(col)
+        assert pos.mask == bitboard.bottom_mask(col)
+
+
+def test_top_mask_is_the_last_playable_cell_not_the_sentinel():
+    """Row 6 exists in the layout as a carry guard. Confusing it with row 5 makes
+    every column look one deeper than it is."""
+    for col in range(WIDTH):
+        pos = Position()
+        for _ in range(HEIGHT):
+            pos.play(col)
+        assert pos.mask & bitboard.top_mask(col), "the full column misses its top bit"
+        assert bitboard.top_mask(col) & bitboard.column_mask(col)
+        assert not pos.can_play(col)
+
+
+def test_column_mask_covers_exactly_the_six_playable_cells():
+    masks = [bitboard.column_mask(col) for col in range(WIDTH)]
+    for col, mask in enumerate(masks):
+        assert popcount(mask) == HEIGHT
+        assert mask & bitboard.bottom_mask(col)
+    # Disjoint, and together they are the whole board minus the sentinel row.
+    union = 0
+    for mask in masks:
+        assert not union & mask, "two columns claim the same bit"
+        union |= mask
+    assert popcount(union) == WIDTH * HEIGHT
+
+
+def test_str_renders_the_board_the_way_a_person_reads_it():
+    """`print(pos)` is the first thing anyone reaches for when a search misbehaves.
+    Rendering it upside down turns debugging into a second bug hunt."""
+    pos = Position.from_moves([0, 1, 0])
+    lines = str(pos).splitlines()
+
+    assert len(lines) == HEIGHT + 1
+    assert lines[-1] == "0123456", "the column ruler is what makes the grid readable"
+    assert lines[-2] == "XO.....", "the bottom row is the last grid line"
+    assert lines[-3] == "X......", "the second stone in column 0 sits above the first"
+    assert lines[0] == "." * WIDTH
