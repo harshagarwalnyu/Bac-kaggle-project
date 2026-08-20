@@ -46,8 +46,13 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      # `az` as well as `dev`. The extra pulls a CPU torch wheel, which is not
+      # small, but the alternative is worse: coverage counts every file under
+      # `src`, so leaving torch out leaves connect4/az/{net,player,train}.py
+      # sitting at 0% and drags the total under the 95% gate. Exempting them
+      # instead would gate the AlphaZero code at nothing at all.
       - name: Install the project and its dev tools
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --extra az --frozen
 
       # Lint first: it takes a second and it fails for reasons a diff can fix.
       - name: Lint
