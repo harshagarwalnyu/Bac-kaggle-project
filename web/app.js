@@ -45,6 +45,8 @@ const el = {
   skill: document.getElementById("skill"),
   skillValue: document.getElementById("skill-value"),
   solverBanner: document.getElementById("solver-banner"),
+  ghostKeyNext: document.getElementById("ghost-key-next"),
+  ghostKeyReply: document.getElementById("ghost-key-reply"),
   tabs: document.getElementById("tabs"),
 };
 
@@ -221,6 +223,14 @@ function render() {
   el.newGame.disabled = state.busy;
   el.solverBanner.hidden = !solverMode();
   el.skill.classList.toggle("solver", solverMode());
+
+  // The legend's two example keys are coloured like the marks they explain, so
+  // they follow the same rule those marks do: the variation starts with the
+  // side to move. That is me most of the time, but not while the bot is
+  // thinking -- and the bot thinks for twelve seconds in solver mode, which is
+  // long enough to read a legend that disagrees with the board.
+  el.ghostKeyNext.className = `ghost-key ${sideClass(state.game.turn)}`;
+  el.ghostKeyReply.className = `ghost-key ${sideClass(3 - state.game.turn)}`;
 }
 
 function renderStatus() {
