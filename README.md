@@ -137,15 +137,58 @@ solves exactly this problem: show a lot of engine output without burying the gam
   easy mode.
 - **Tabs** for Analysis, the move list, and past games.
 
+### The difficulty dial is not evenly spaced
+
+`scripts/tournament.py` plays every difficulty against every other, both seats,
+from a shared book of openings — the seat and the opening are the only things
+that vary, because the engine is deterministic and replaying a pairing would
+just replay one game. 168 games at a 0.1s base clock, fitted to a Bradley-Terry
+rating and put on the Elo scale:
+
+| level | elo | step over the one below | expected score vs it |
+|-------|-----|-------------------------|----------------------|
+| 6 | 562 | 114 | 66% |
+| 5 | 448 | **206** | 77% |
+| 4 | 242 | 128 | 68% |
+| 3 | 114 | **6** | 51% |
+| 2 | 107 | 72 | 60% |
+| 1 | 35 | 35 | 55% |
+| 0 | 0 | — | — |
+
+The dial reads like seven even notches and is not one. **Levels 2 and 3 are the
+same opponent** — six Elo apart, a coin flip — and the largest jump on the whole
+ladder is 4 to 5, nearly double the celebrated 5-to-6 step.
+
+That falls out of how the levels are defined. Difficulties 0–4 play the
+`(5 - skill)`-th best move from one search; 5 plays the best. So the dial is
+really an index into a ranking, and the gap between the 3rd- and 4th-best of
+seven columns is much smaller than the gap between the 1st and 2nd. The low end
+compresses because the moves themselves are close together, not because the
+search is weaker. Anyone rebalancing the dial should start there, not at the
+solver.
+
+The Elo fit credits every pair with one virtual draw. Without it an undefeated
+level has no finite rating, and level 6 is undefeated against everything below
+it. That is a deliberate thumb on the scale: an honest 562 with a stated prior
+beats an infinity.
+
 ## Solver mode (difficulty 6)
 
 Connect 4 is solved — the first player wins by move 41 with perfect play. Skill 6
 is a separate mode rather than another notch on the dial, because what changes is
-the *budget*, not the move choice: six times the clock, and a transposition table
-that persists between moves. That second part matters more than the first.
-Consecutive searches in one game overlap enormously, so keeping the table turns
-each move into a continuation of the last rather than a fresh start. Entries are
-keyed by position, not by search, so the reuse is sound.
+the *budget*, not the move choice: twelve times the clock (`CONNECT4_TIME_LIMIT`
+is 1.0s, `CONNECT4_SOLVER_TIME_LIMIT` is 12.0s), and a transposition table that
+persists between moves. Consecutive searches in one game overlap enormously, so
+keeping the table turns each move into a continuation of the last rather than a
+fresh start. Entries are keyed by position, not by search, so the reuse is sound.
+
+Which of the two knobs actually buys the strength is a fair question and
+`scripts/ablate.py` exists to answer it — it crosses the two and plays the four
+resulting configurations against each other. At a scaled-down clock the clock
+wins that comparison and the table contributes nothing measurable, but that run
+is a hostile test for the table: search overlap between consecutive moves is
+precisely what a persistent table sells, and overlap grows with the budget. Run
+it at `--time 1.0` before believing either answer.
 
 It does **not** claim a solve from the empty board — proving that takes billions of
 nodes, which CPython is not going to do inside a web request. Walking a full game

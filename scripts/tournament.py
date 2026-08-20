@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 import random
 import sys
 import time
@@ -346,6 +347,77 @@ def format_answer(report: Report, low: int, high: int) -> str:
     )
 
 
+def elo(report: Report, skills, prior: float = 1.0, rounds: int = 500) -> dict[int, float]:
+    """Fit a Bradley-Terry rating to the results and express it in Elo points.
+
+    The points column is ordinal. It ranks the levels correctly and says
+    nothing about the *size* of the steps -- whether 4 to 5 is the same jump as
+    5 to 6 is exactly the question it cannot answer, because a level that wins
+    every game caps out at the same score no matter how far ahead it is.
+
+    Bradley-Terry answers it: fit each level a strength such that the predicted
+    win probabilities best match what happened, then map to the Elo scale. It
+    is fitted by minorization-maximization, which for this model is a handful
+    of lines and converges monotonically -- no gradient, no step size.
+
+    The catch is that an undefeated level has no finite maximum: nothing in the
+    data bounds it from above. Level 6 in a small run is exactly that. So every
+    pair is credited with ``prior`` virtual draws against each other, which
+    bounds every rating and shrinks the extremes toward the field. It is a
+    thumb on the scale, and it is deliberate: an honest 700 with a stated prior
+    beats an infinity.
+    """
+    table = head_to_head(report)
+    strength = dict.fromkeys(skills, 1.0)
+
+    for _ in range(rounds):
+        updated = {}
+        for a in skills:
+            wins = expected = 0.0
+            for b in skills:
+                if a == b:
+                    continue
+                record = table.get((a, b), Record())
+                # A draw is half a win to each side, the same convention the
+                # points column uses, plus the virtual pair.
+                games = record.played + 2 * prior
+                if not games:
+                    continue
+                wins += record.wins + 0.5 * record.draws + prior
+                expected += games / (strength[a] + strength[b])
+            updated[a] = wins / expected if expected else strength[a]
+        strength = updated
+
+    # Elo is a log scale with 400 points per factor of ten in odds. The anchor
+    # is arbitrary; the weakest level gets 0 so every number reads as "how far
+    # above the floor".
+    scale = 400.0 / math.log10(10.0)
+    raw = {s: scale * math.log10(v) for s, v in strength.items()}
+    floor = min(raw.values())
+    return {s: v - floor for s, v in raw.items()}
+
+
+def format_elo(report: Report, skills) -> str:
+    ratings = elo(report, skills)
+    order = sorted(skills, key=lambda s: ratings[s], reverse=True)
+    lines = [
+        "",
+        "Fitted strength (Bradley-Terry, Elo scale, weakest level anchored at 0)",
+        "",
+        f"  {'level':<8}{'elo':>7}{'step':>8}   expected score vs the level below",
+        "  " + "-" * 62,
+    ]
+    for i, skill in enumerate(order):
+        below = order[i + 1] if i + 1 < len(order) else None
+        if below is None:
+            lines.append(f"  L{skill:<7}{ratings[skill]:>7.0f}{'--':>8}")
+            continue
+        step = ratings[skill] - ratings[below]
+        share = 1.0 / (1.0 + 10.0 ** (-step / 400.0))
+        lines.append(f"  L{skill:<7}{ratings[skill]:>7.0f}{step:>8.0f}   {share:>29.0%}")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
@@ -390,6 +462,7 @@ def main() -> int:
 
     print()
     print(format_matrix(report, SKILLS))
+    print(format_elo(report, SKILLS))
     print(format_seats(report, SKILLS))
     print(format_answer(report, SOLVER_SKILL - 1, SOLVER_SKILL))
     print(f"\n{len(report.outcomes)} games in {elapsed:.1f}s")
