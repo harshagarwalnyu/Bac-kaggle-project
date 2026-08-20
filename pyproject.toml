@@ -31,6 +31,22 @@ packages = ["src/connect4"]
 testpaths = ["tests"]
 addopts = "-q"
 
+[tool.coverage.run]
+source = ["src/connect4"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# The suite covers 98% of statements. The gate sits at 95 rather than at the
+# current number: a floor that trips on every unrelated refactor gets raised
+# by whoever is annoyed that day, and a gate people edit to make green is not
+# a gate. 95 is where the number stops being a fact and starts being a choice.
+fail_under = 95
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py314"

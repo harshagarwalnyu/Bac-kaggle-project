@@ -13,6 +13,9 @@ whose board is written out explicitly, and a round-trip through the encoder.
 
 from __future__ import annotations
 
+import gzip
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -24,8 +27,11 @@ from connect4.dataset import (
     LABELS,
     N_FEATURES,
     RAW_FEATURES,
+    UCI_URL,
+    build_dataset,
     encode,
     encode_batch,
+    ensure_raw_data,
     load_samples,
     parse_line,
     stratified_split,
@@ -320,3 +326,204 @@ def test_every_real_position_has_exactly_eight_stones():
     samples = load_samples(DATA_FILE, validate=False)
     for sample in samples[:2000]:
         assert popcount(sample.position.mask) == 8
+
+
+# --------------------------------------------------------------------------
+# Reading a file
+# --------------------------------------------------------------------------
+
+
+def _legal_row(base: int, label: str = "win") -> str:
+    """A legal eight-stone row: two stacked columns starting at ``base``.
+
+    Columns alternate which colour sits on the bottom, so neither rank forms a
+    horizontal four. Four stones each, x to move, nothing decided.
+    """
+    cells: dict[tuple[int, int], str] = {}
+    for offset in range(4):
+        col = base + offset
+        bottom, top = ("x", "o") if offset % 2 == 0 else ("o", "x")
+        cells[(col, 0)] = bottom
+        cells[(col, 1)] = top
+    return _row(cells, label=label)
+
+
+def test_load_skips_blank_lines(tmp_path: Path):
+    """Trailing newlines are the normal shape of a text file, not an error."""
+    path = tmp_path / "d.data"
+    path.write_text(f"\n{_legal_row(0)}\n\n{_legal_row(1)}\n\n", encoding="ascii")
+    assert len(load_samples(path)) == 2
+
+
+def test_load_names_the_file_and_line_that_failed(tmp_path: Path):
+    """A bare "bad label" in a 67,557-row file is not a usable error message."""
+    path = tmp_path / "d.data"
+    path.write_text(f"{_legal_row(0)}\n{_row({}, label='landslide')}\n", encoding="ascii")
+
+    with pytest.raises(ValueError) as failure:
+        load_samples(path)
+    assert "d.data:2" in str(failure.value)
+
+
+def test_load_reports_a_validation_failure_against_the_line_too(tmp_path: Path):
+    """The line number has to survive `validate_sample`, not just `parse_line`."""
+    path = tmp_path / "d.data"
+    # Four stones each, so the count check passes and the gravity check is the
+    # one that has to fire: column 3's upper stone hangs two rows above its pile.
+    floating = _row(
+        {
+            (0, 0): "x", (0, 1): "o",
+            (1, 0): "o", (1, 1): "x",
+            (2, 0): "x", (2, 1): "o",
+            (3, 0): "o", (3, 3): "x",
+        }
+    )
+    path.write_text(f"{floating}\n", encoding="ascii")
+
+    with pytest.raises(ValueError) as failure:
+        load_samples(path)
+    assert "d.data:1" in str(failure.value)
+    assert "floating" in str(failure.value)
+
+
+def test_load_can_be_told_not_to_validate(tmp_path: Path):
+    """The real file is validated once; re-checking 67,557 rows per run is waste."""
+    path = tmp_path / "d.data"
+    path.write_text(f"{_row({(0, 1): 'x', (1, 0): 'o'})}\n", encoding="ascii")
+    assert len(load_samples(path, validate=False)) == 1
+
+
+# --------------------------------------------------------------------------
+# Fetching and unpacking
+# --------------------------------------------------------------------------
+
+
+def _uci_archive(directory: Path, body: str) -> Path:
+    """A stand-in for the UCI zip: one ``.Z`` member, LZW-ish, gzip-readable.
+
+    The real file is Unix `compress` output. `gzip.open` reads it on the
+    platforms we care about, which is the path under test here; the `unlzw3`
+    fallback is platform-dependent and marked no-cover in the source.
+    """
+    archive = directory / "connect4.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("connect-4.data.Z", gzip.compress(body.encode("ascii")))
+    return archive
+
+
+def test_an_already_unpacked_file_is_left_alone(tmp_path: Path):
+    """67,557 rows is not something to re-download because a flag says so."""
+    plain = tmp_path / "connect-4.data"
+    plain.write_text(f"{_legal_row(0)}\n", encoding="ascii")
+    before = plain.read_bytes()
+
+    assert ensure_raw_data(tmp_path) == plain
+    assert plain.read_bytes() == before, "the existing file was overwritten"
+
+
+def test_an_empty_file_does_not_count_as_unpacked(tmp_path: Path):
+    """A zero-byte file is what a failed download leaves behind, not a dataset."""
+    (tmp_path / "connect-4.data").write_bytes(b"")
+    _uci_archive(tmp_path, f"{_legal_row(0)}\n")
+
+    plain = ensure_raw_data(tmp_path)
+    assert plain.read_text(encoding="ascii").strip() == _legal_row(0)
+
+
+def test_a_present_archive_is_unpacked_without_downloading(tmp_path: Path, monkeypatch):
+    """No network in the test suite. If this reaches urlretrieve, it is a bug."""
+    monkeypatch.setattr(
+        urllib.request,
+        "urlretrieve",
+        lambda *a, **k: pytest.fail("downloaded despite a local archive"),
+    )
+    _uci_archive(tmp_path, f"{_legal_row(0)}\n{_legal_row(1)}\n")
+
+    samples = load_samples(ensure_raw_data(tmp_path))
+    assert len(samples) == 2
+
+
+def test_an_archive_without_the_expected_member_says_so(tmp_path: Path):
+    """"No such file" pointing at a path that plainly exists wastes an afternoon."""
+    archive = tmp_path / "connect4.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("README", "wrong member")
+
+    with pytest.raises(FileNotFoundError) as failure:
+        ensure_raw_data(tmp_path)
+    assert "connect-4.data.Z" in str(failure.value)
+    assert "connect4.zip" in str(failure.value)
+
+
+# --------------------------------------------------------------------------
+# End to end
+# --------------------------------------------------------------------------
+
+
+def _corpus(rows_per_label: int = 12) -> str:
+    lines = [
+        _legal_row(base % 4, label=label)
+        for label in LABELS
+        for base in range(rows_per_label)
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def test_build_dataset_goes_from_archive_to_splits(tmp_path: Path):
+    _uci_archive(tmp_path, _corpus())
+
+    splits = build_dataset(tmp_path, cache=False)
+
+    assert set(splits) == {"train", "val", "test"}
+    total = sum(len(y) for _, y in splits.values())
+    assert total == len(LABELS) * 12
+    for x, y in splits.values():
+        assert x.shape == (len(y), N_FEATURES)
+
+
+def test_build_dataset_reuses_its_cache_instead_of_reparsing(tmp_path: Path):
+    """The cache is the whole point: parsing 67,557 rows per run is a minute lost."""
+    _uci_archive(tmp_path, _corpus())
+
+    first = build_dataset(tmp_path, cache=True)
+    assert (tmp_path / "encoded_seed0.npz").exists()
+
+    # Delete the raw inputs. A second call that still succeeds can only have
+    # come from the cache, which is a stronger claim than "the arrays match".
+    (tmp_path / "connect-4.data").unlink()
+    (tmp_path / "connect4.zip").unlink()
+
+    second = build_dataset(tmp_path, cache=True)
+    for name in first:
+        assert np.array_equal(first[name][0], second[name][0])
+        assert np.array_equal(first[name][1], second[name][1])
+
+
+def test_the_cache_is_keyed_by_seed(tmp_path: Path):
+    """One cache file for every seed would silently serve the wrong split."""
+    _uci_archive(tmp_path, _corpus())
+
+    build_dataset(tmp_path, cache=True, seed=0)
+    build_dataset(tmp_path, cache=True, seed=1)
+
+    assert (tmp_path / "encoded_seed0.npz").exists()
+    assert (tmp_path / "encoded_seed1.npz").exists()
+
+
+def test_a_missing_archive_is_downloaded_once(tmp_path: Path, monkeypatch):
+    """The download is stubbed, not skipped: the call has to happen, with the
+    published UCI url, and land at the path the unpacking step then reads."""
+    calls: list[tuple[str, Path]] = []
+
+    def fake_retrieve(url, filename):
+        calls.append((url, Path(filename)))
+        with zipfile.ZipFile(filename, "w") as zf:
+            zf.writestr("connect-4.data.Z", gzip.compress(f"{_legal_row(0)}\n".encode("ascii")))
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_retrieve)
+
+    plain = ensure_raw_data(tmp_path)
+    assert len(calls) == 1
+    assert calls[0][0] == UCI_URL
+    assert calls[0][1] == tmp_path / "connect4.zip"
+    assert len(load_samples(plain)) == 1

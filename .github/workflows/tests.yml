@@ -53,8 +53,11 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      # `--cov` alone; the source and the 95% floor live in pyproject so the
+      # gate is the same number locally and here. A threshold that only exists
+      # in CI is one nobody can reproduce before pushing.
       - name: Test
-        run: uv run pytest
+        run: uv run pytest --cov
 
   web:
     name: node ${{ matrix.node }}
