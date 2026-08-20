@@ -1,12 +1,13 @@
 """Which half of solver mode is doing the work: the clock, or the table?
 
 ``api.py`` builds difficulty 6 with two changes over difficulty 5 -- twelve
-times the time limit, and a transposition table that survives between moves --
-and a comment beside it asserts the table is "the bigger of the two". That is
-a plausible claim. Consecutive searches in one game really do overlap
+times the time limit, and a transposition table that survives between moves.
+A comment beside it used to assert the table was "the bigger of the two".
+That is a plausible claim: consecutive searches in one game really do overlap
 enormously, so a kept table really should turn each move into a continuation
 of the last rather than a fresh start. But it was never measured, and an
-unmeasured claim in shipped code is a guess wearing a lab coat.
+unmeasured claim in shipped code is a guess wearing a lab coat, so the comment
+now points here instead. This script is what gets to answer it.
 
 So: cross the two knobs and play the four resulting configurations against
 each other.
@@ -27,7 +28,7 @@ because Connect 4 is a first-player win with perfect play; and every game gets
 a fresh engine, so no result depends on the order the matches ran in.
 
     uv run python -m scripts.ablate                      # scaled, ~minutes
-    uv run python -m scripts.ablate --time 1.0           # as shipped, slow
+    uv run python -m scripts.ablate --time 1.0 --max-seconds 5400   # as shipped
 """
 
 from __future__ import annotations
@@ -125,13 +126,27 @@ def play_game(
     )
 
 
-def run(report: Report, verbose: bool = True) -> Report:
+def run(report: Report, verbose: bool = True, max_seconds: float | None = None) -> Report:
+    """Play the round robin, opening by opening.
+
+    The loop is opening-major rather than pairing-major so that ``max_seconds``
+    can cut the run without tilting it. Every opening plays all twelve ordered
+    pairings, so a run stopped between openings is still a balanced design --
+    fewer openings, but every configuration has met every other one the same
+    number of times from each seat. Stopping mid-opening would hand whichever
+    configurations happened to be scheduled early a few extra games, and the
+    share-of-the-gap arithmetic downstream would silently divide by that.
+
+    ``--time 1.0`` is a run of hours, which is exactly when an unattended bound
+    is worth having.
+    """
     pairs = list(itertools.permutations(configs(report.solver_multiple), 2))
     total = len(pairs) * len(report.openings)
     played = 0
+    started = time.perf_counter()
 
-    for first, second in pairs:
-        for opening in report.openings:
+    for index, opening in enumerate(report.openings, start=1):
+        for first, second in pairs:
             outcome = play_game(first, second, opening, report.base_time_s)
             report.outcomes.append((first, second, outcome))
             played += 1
@@ -144,6 +159,16 @@ def run(report: Report, verbose: bool = True) -> Report:
                     f"{result:>6} in {outcome.plies} plies, {outcome.seconds:5.1f}s",
                     flush=True,
                 )
+
+        elapsed = time.perf_counter() - started
+        if max_seconds is not None and elapsed >= max_seconds and index < len(report.openings):
+            report.openings = report.openings[:index]
+            print(
+                f"\n  stopping after {index} of the requested openings: "
+                f"{elapsed:.0f}s past the {max_seconds:g}s budget.",
+                flush=True,
+            )
+            break
     return report
 
 
@@ -231,9 +256,9 @@ def verdict(
 
     margin = 0.1
     if table_share > clock_share + margin:
-        lines.append("  The persistent table is the bigger of the two, as api.py claims.")
+        lines.append("  The persistent table is the bigger of the two.")
     elif clock_share > table_share + margin:
-        lines.append("  The clock is the bigger of the two here, which api.py's comment denies.")
+        lines.append("  The clock is the bigger of the two here.")
     else:
         lines.append("  Neither knob dominates within the margin of this sample.")
 
@@ -258,6 +283,12 @@ def main() -> int:
     parser.add_argument("--openings", type=int, default=4)
     parser.add_argument("--opening-plies", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="stop after the first whole opening that finishes past this budget",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -275,7 +306,7 @@ def main() -> int:
     )
 
     started = time.perf_counter()
-    run(report, verbose=not args.quiet)
+    run(report, verbose=not args.quiet, max_seconds=args.max_seconds)
     print(format_report(report))
     print(f"\n{len(report.outcomes)} games in {time.perf_counter() - started:.1f}s")
     return 0
