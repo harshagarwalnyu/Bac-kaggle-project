@@ -167,6 +167,18 @@ function absorb(data) {
 
 /** The bot owns one colour; the human owns the other. */
 const humanPlayer = () => (state.game.bot_player === 1 ? 2 : 1);
+
+/**
+ * The class that paints a stone: yellow for the human, red for the bot.
+ *
+ * Choosing it from the player *number* looks right only while the human opens.
+ * Let the bot go first and it becomes player 1, so the board hands the bot the
+ * yellow stones and the human the red ones -- while the legend underneath still
+ * says "yellow outlines are yours". Every other number on this page is stated
+ * from the human's side; the colours are a statement about roles too, so they
+ * have to be chosen from the role rather than from the seat.
+ */
+const sideClass = (player) => (player === humanPlayer() ? "you" : "bot");
 const solverMode = () => Number(el.skill.value) >= SOLVER_SKILL;
 const myTurn = () =>
   state.game && state.game.status === "playing" && state.game.turn === humanPlayer();
@@ -298,7 +310,7 @@ function renderBoard() {
       const value = game.grid[row][column];
       if (value !== 0) {
         const disc = document.createElement("div");
-        disc.className = `disc p${value}`;
+        disc.className = `disc ${sideClass(value)}`;
         if (lastCell && lastCell.row === row && lastCell.column === column) {
           disc.classList.add("last");
         }
@@ -307,7 +319,7 @@ function renderBoard() {
         const ghost = ghosts.get(`${row},${column}`);
         if (ghost) {
           const mark = document.createElement("div");
-          mark.className = `ghost p${ghost.player}`;
+          mark.className = `ghost ${sideClass(ghost.player)}`;
           mark.textContent = String(ghost.order);
           cell.appendChild(mark);
         }
