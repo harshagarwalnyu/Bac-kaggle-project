@@ -211,6 +211,21 @@ test("undo is offered only once the human has a turn to take back", async () => 
   assert.equal(loaded.el.undo.disabled, true);
 });
 
+test("undo before the human has moved leaves the bot's opening alone", async () => {
+  // The button is disabled here, but a keyboard, a double click landing after
+  // the state changed, or a later refactor can still reach the handler. The
+  // server answers this one with the game unchanged rather than an error, so
+  // the page must not end up showing a failure it was never given.
+  const loaded = await loadApp({ controls: { "bot-first": true } });
+  assert.equal(loaded.state.game.moves.length, 1, "the bot opened");
+
+  await loaded.app.undo();
+  await loaded.settle();
+  assert.equal(loaded.state.game.moves.length, 1, "the bot's opening was taken back");
+  assert.equal(loaded.state.game.turn, 3 - loaded.state.game.bot_player, "it is still the human's move");
+  assert.equal(loaded.state.message, "", "an error appeared where the server sent none");
+});
+
 test("undo asks the server rather than editing the board in place", async () => {
   const loaded = await loadApp();
   await play(loaded, 3);

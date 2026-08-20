@@ -396,9 +396,13 @@ class FakeServer {
         // turns rather than single plies.
         const humanPlayer = game.botPlayer === 1 ? 2 : 1;
         const humanPlies = game.moves.filter((_, i) => 1 + (i % 2) === humanPlayer).length;
-        if (!humanPlies) {
-          throw Object.assign(new Error("Nothing to undo."), { status: 409, detail: "Nothing to undo." });
-        }
+        // A board holding no ply of the human's is the one case the real
+        // endpoint answers with the game *unchanged* rather than an error
+        // (api.py: `return _respond(game)`), because popping the bot's opening
+        // would leave the bot on move and wedge the game. Refusing here with a
+        // 409 would be a fiction, and a fake that invents failures the server
+        // cannot produce teaches the client to handle the wrong things.
+        if (!humanPlies) return this.respond(game);
         while (game.moves.length) {
           const removed = 1 + ((game.moves.length - 1) % 2);
           game.moves.pop();
