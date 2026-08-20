@@ -165,8 +165,8 @@ main {
 /* Only the stone that was just played animates. Animating every disc on every
    render makes the board jump each time anything changes. */
 .disc.last { animation: drop 260ms cubic-bezier(0.34, 1.2, 0.64, 1); }
-.disc.p1 { background: radial-gradient(circle at 34% 30%, #ffe08a, var(--player)); }
-.disc.p2 { background: radial-gradient(circle at 34% 30%, #ff8f97, var(--bot)); }
+.disc.you { background: radial-gradient(circle at 34% 30%, #ffe08a, var(--player)); }
+.disc.bot { background: radial-gradient(circle at 34% 30%, #ff8f97, var(--bot)); }
 
 /* The last move is worth finding at a glance, especially on a busy board. */
 .disc.last { outline: 2px solid var(--ink); outline-offset: -4px; }
@@ -185,8 +185,8 @@ main {
   border: 2px dashed var(--ink-dim);
   opacity: 0.55;
 }
-.ghost.p1 { border-color: var(--player); color: var(--player); }
-.ghost.p2 { border-color: var(--bot); color: var(--bot); }
+.ghost.you { border-color: var(--player); color: var(--player); }
+.ghost.bot { border-color: var(--bot); color: var(--bot); }
 
 @keyframes drop {
   from { transform: translateY(-320%); }
@@ -264,8 +264,8 @@ input[type="range"].solver { accent-color: var(--proof); }
   font: 700 11px/1 var(--mono);
   vertical-align: -5px;
 }
-.ghost-key.p1 { color: var(--player); }
-.ghost-key.p2 { color: var(--bot); }
+.ghost-key.you { color: var(--player); }
+.ghost-key.bot { color: var(--bot); }
 
 /* ---------------------------------------------------------------- panel */
 
