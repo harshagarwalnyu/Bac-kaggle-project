@@ -312,7 +312,8 @@ async def lifespan(app: FastAPI):
         time_limit_s=TIME_LIMIT_S,
     )
 
-    # Solver mode. Same code, two changes that matter: six times the clock, and
+    # Solver mode. Same code, two changes that matter: twelve times the clock
+    # (SOLVER_TIME_LIMIT_S over TIME_LIMIT_S, as shipped), and
     # a transposition table that survives between moves. The second is the
     # bigger of the two -- consecutive searches in one game overlap enormously,
     # so keeping the table turns each move into a continuation of the last
