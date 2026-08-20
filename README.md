@@ -1,6 +1,7 @@
 # Connect 4 — a glass-box bot
 
 [![tests](https://github.com/harshagarwalnyu/Bac-kaggle-project/actions/workflows/tests.yml/badge.svg)](https://github.com/harshagarwalnyu/Bac-kaggle-project/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A Connect 4 bot you can play in the browser, built on the
 [UCI `connect-4` opening database](https://archive.ics.uci.edu/dataset/26/connect+4)
@@ -352,3 +353,16 @@ Those first three lines are exactly what CI runs on every push and pull request
 ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) — the python suite on
 3.14, the front-end suite on node 20 and 24. There is no step in CI that you cannot
 run yourself, and no step here that CI skips.
+
+The interpreter is pinned in [`.python-version`](.python-version), so `uv` picks 3.14
+without being told and downloads it if the machine does not have it.
+
+## License
+
+The code is [MIT](LICENSE).
+
+The dataset is not mine to license: the UCI `connect-4` database is distributed by the
+[UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/26/connect+4) under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), and the perfect-play labels in
+it are John Tromp's work. Nothing in this repository redistributes it — `scripts/train.py`
+fetches it from the archive at first run, which is also why `data/raw/` is gitignored.
