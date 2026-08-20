@@ -323,7 +323,7 @@ scripts/validate.py  the experiments above
 scripts/az_pretrain.py  warm-starts the value head on solver-exact labels
 scripts/train_az.py     the self-play loop: play, learn, gate, promote
 scripts/az_arena.py     grades a checkpoint against fixed opponents
-tests/          455 tests (409 without the optional `az` extra)
+tests/          471 tests (425 without the optional `az` extra)
 .github/        the workflow that runs both suites on every push
 ```
 
@@ -443,7 +443,7 @@ entirely. Accuracy alone would have hidden that completely.
 ```bash
 uv sync --extra dev
 uv run ruff check .                        # lint
-uv run python -m pytest                    # 455 tests (409 without --extra az)
+uv run python -m pytest                    # 471 tests (425 without --extra az)
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
 uv run python -m scripts.validate          # the three experiments above

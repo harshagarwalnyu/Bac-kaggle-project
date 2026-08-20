@@ -312,12 +312,13 @@ async def lifespan(app: FastAPI):
         time_limit_s=TIME_LIMIT_S,
     )
 
-    # Solver mode. Same code, two changes that matter: twelve times the clock
-    # (SOLVER_TIME_LIMIT_S over TIME_LIMIT_S, as shipped), and
-    # a transposition table that survives between moves. The second is the
-    # bigger of the two -- consecutive searches in one game overlap enormously,
-    # so keeping the table turns each move into a continuation of the last
-    # rather than a fresh start.
+    # Solver mode. Same code, two changes: twelve times the clock
+    # (SOLVER_TIME_LIMIT_S over TIME_LIMIT_S, as shipped), and a transposition
+    # table that survives between moves. Consecutive searches in one game
+    # overlap enormously, so keeping the table turns each move into a
+    # continuation of the last rather than a fresh start. Which of the two
+    # knobs actually buys the strength is measured by scripts/ablate.py, not
+    # asserted here.
     app.state.solver = Engine(
         evaluator=heuristic_evaluator,
         max_depth=MAX_PLIES,
