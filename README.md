@@ -422,6 +422,41 @@ run recorded here it took validation MSE from 0.731 (predict the mean) to 0.188,
 with 94% sign agreement on decisive positions. The trunk is shared, so the
 policy head still starts from a representation that has seen exact labels.
 
+### What it actually plays like
+
+Twenty iterations of 200 self-play games, starting from the warm-started value
+head. Thirteen challengers cleared the gate and **seven were thrown away** — the
+gate is filtering, not rubber-stamping, which is the only reason the chain of
+"better than the last one" means anything. Policy loss fell monotonically from
+1.509 to 1.178 across the run, and the whole thing took 24 minutes on 4 CPU
+threads.
+
+The final champion, 40 games per opponent, 200 simulations per move, engine on a
+0.05s clock:
+
+| opponent | score | record |
+|---|---|---|
+| random | 1.000 | 40-0-0 |
+| **uniform search** | **0.950** | 36-4-0 |
+| engine, skill 0–2 | 1.000 | 40-0-0 |
+| engine, skill 3 | 0.988 | 39-1-0 |
+| engine, skill 4 | 0.925 | 37-0-3 |
+| engine, skill 5 | 0.625 | 22-6-12 |
+
+The uniform-search control is the one to read first. Same MCTS, same 200
+simulations, flat priors and zero values — 0.950 against it means the *network*
+is carrying the result and not the search wrapped around it.
+
+**The engine's clock is the caveat, and it moves the numbers.** At 0.05s a move
+the engine is on a twentieth of what it ships with. Re-run against skill 5 at the
+shipped 1.0s and the score falls from 0.625 to 0.500 (3-2-3 over 8 games). The
+learned player is competitive with difficulty 5, not past it.
+
+**Skill 6 is not a skill number.** `Engine.choose_move` branches on `skill >= 5`,
+so asking the arena for skill 6 returns the skill 5 player under a different
+label. Difficulty 6 is an *engine*: twelve times the clock and a transposition
+table that survives between moves. `--solver` is what builds it.
+
 ## The model
 
 `(98 → 128 → 64 → 3)`, ≈21k parameters. He init, ReLU, numerically stable softmax,
