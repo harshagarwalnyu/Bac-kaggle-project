@@ -23,6 +23,20 @@ az = [
     "torch>=2.6",
 ]
 
+# Torch from PyTorch's CPU index rather than PyPI. The PyPI Linux wheel
+# declares the whole CUDA stack as hard dependencies -- cuda-toolkit, cudnn,
+# nccl, triton -- which is several gigabytes to install a thing that will only
+# ever run on a CPU here. No machine in this project has an NVIDIA card, and
+# the CI runner certainly does not. Same wheel content on Windows, where PyPI
+# torch is CPU-only anyway.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
