@@ -18,9 +18,14 @@ The opponents, weakest first:
   *search* contributed. A network that only matches this has learned nothing
   the search was not already doing.
 * **the shipped engine, at each skill level** -- alpha-beta with the
-  hand-written evaluator, which at level 6 is close to perfect play. This is
-  the number that means something: it compares the learned player against the
-  thing the project already ships.
+  hand-written evaluator. This is the number that means something: it compares
+  the learned player against the thing the project already ships.
+* **solver mode**, under ``--solver``. Worth stating plainly, because the
+  ``--skills`` list cannot reach it: ``Engine.choose_move`` branches on
+  ``skill >= 5``, so asking it for skill 6 returns the skill 5 player. What
+  makes difficulty 6 is the *engine* -- twelve times the clock and a
+  transposition table that survives between moves -- and only ``--solver``
+  builds that.
 
 **The clock is not equalised, and cannot honestly be.** MCTS at N simulations
 and alpha-beta at T seconds are not commensurable, so every result here is
@@ -45,9 +50,13 @@ import numpy as np
 from connect4.az.arena import EnginePlayer, RandomPlayer, match
 from connect4.az.net import Evaluator, PolicyValueNet, configure_threads, uniform_evaluator
 from connect4.az.player import AZPlayer
-from connect4.engine import Engine
+from connect4.engine import MAX_PLIES, Engine, heuristic_evaluator
 
 MAX_SKILL = 6
+
+#: How much more clock difficulty 6 gets than difficulty 5, matching api.py's
+#: CONNECT4_SOLVER_TIME_LIMIT over CONNECT4_TIME_LIMIT as shipped.
+SOLVER_MULTIPLE = 12.0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -67,6 +76,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="*",
         default=list(range(MAX_SKILL + 1)),
         help="engine difficulty levels to play against",
+    )
+    parser.add_argument(
+        "--solver",
+        action="store_true",
+        help=(
+            "also play difficulty 6 as api.py actually builds it: "
+            f"{SOLVER_MULTIPLE:g}x the clock and a persistent transposition table"
+        ),
     )
     parser.add_argument("--symmetry", action="store_true", help="mirror-average every evaluation")
     parser.add_argument("--threads", type=int, default=4)
@@ -93,6 +110,22 @@ def grade(
     for skill in args.skills:
         engine = Engine(time_limit_s=args.engine_time)
         opponents.append((f"engine-skill-{skill}", EnginePlayer(engine, skill=skill)))
+
+    if args.solver:
+        # Difficulty 6 is not a skill number. `Engine.choose_move` branches on
+        # `skill >= 5`, so passing 6 there gets the same player as 5 -- what
+        # actually makes solver mode is the *engine*: SOLVER_MULTIPLE times the
+        # clock and a transposition table that survives between moves, exactly
+        # as api.py wires it. One engine instance for the whole match, because
+        # that is what the app does too: the table is app-level and outlives any
+        # single game.
+        solver = Engine(
+            evaluator=heuristic_evaluator,
+            max_depth=MAX_PLIES,
+            time_limit_s=args.engine_time * SOLVER_MULTIPLE,
+            persist_table=True,
+        )
+        opponents.append(("engine-solver", EnginePlayer(solver, skill=5)))
 
     for name, opponent in opponents:
         started = time.perf_counter()

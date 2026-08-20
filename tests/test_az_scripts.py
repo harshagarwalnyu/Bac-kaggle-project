@@ -115,3 +115,72 @@ def test_loading_the_value_dataset_yields_planes_and_bounded_values():
     boards, values = az_pretrain.load_value_dataset(data_dir, limit=32)
     assert boards.shape == (32, PLANES, HEIGHT, WIDTH)
     assert set(np.unique(values)) <= {-1.0, 0.0, 1.0}
+
+
+def _graded_opponents(args) -> dict[str, object]:
+    """Run the real ``grade`` with ``match`` stubbed, and return its opponents.
+
+    Rebuilding the opponent list in the test would only assert that the copy
+    matches itself. Stubbing ``match`` drives the actual code path and costs no
+    games.
+    """
+    import numpy as _np
+
+    from connect4.az.arena import Record
+    from connect4.az.net import uniform_evaluator
+    from connect4.az.player import AZPlayer
+
+    seen: dict[str, object] = {}
+    real_match = az_arena.match
+
+    def fake_match(player, opponent, games):
+        seen[str(len(seen))] = opponent
+        return Record()
+
+    az_arena.match = fake_match
+    try:
+        player = AZPlayer(uniform_evaluator, simulations=2)
+        names = list(az_arena.grade(player, args, _np.random.default_rng(0)))
+    finally:
+        az_arena.match = real_match
+
+    return dict(zip(names, seen.values(), strict=True))
+
+
+def test_skill_six_is_not_solver_mode_and_the_flag_is_what_builds_it():
+    """The distinction the arena's numbers depend on.
+
+    ``Engine.choose_move`` branches on ``skill >= 5``, so an "engine-skill-6"
+    opponent is the skill 5 player wearing a different label. Solver mode is a
+    different *engine* -- twelve times the clock, and a transposition table that
+    survives between moves. Reporting the first as if it were the second would
+    overstate what the network beat.
+    """
+    from connect4.az.arena import EnginePlayer
+
+    plain_args = az_arena.parse_args(["some.pt", "--skills", "5", "--engine-time", "0.01"])
+    assert plain_args.solver is False
+    assert "engine-solver" not in _graded_opponents(plain_args)
+
+    args = az_arena.parse_args(
+        ["some.pt", "--skills", "5", "--engine-time", "0.01", "--solver"]
+    )
+    opponents = _graded_opponents(args)
+    assert "engine-solver" in opponents
+
+    plain = opponents["engine-skill-5"]
+    solver = opponents["engine-solver"]
+    assert isinstance(solver, EnginePlayer)
+    # The multiple and the table are the whole difference.
+    assert solver.engine.time_limit_s == pytest.approx(
+        plain.engine.time_limit_s * az_arena.SOLVER_MULTIPLE
+    )
+    assert solver.engine.persist_table is True
+    assert plain.engine.persist_table is False
+
+
+def test_the_solver_multiple_matches_what_the_app_ships():
+    """A drift between these two makes every solver number quietly wrong."""
+    from connect4.api import SOLVER_TIME_LIMIT_S, TIME_LIMIT_S
+
+    assert az_arena.SOLVER_MULTIPLE == pytest.approx(SOLVER_TIME_LIMIT_S / TIME_LIMIT_S)
