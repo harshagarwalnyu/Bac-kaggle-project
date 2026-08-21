@@ -33,3 +33,9 @@ data/games.jsonl
 
 # Claude Code session state -- machine-local, never shared.
 .claude/
+
+# mutmut copies the tree it mutates into ./mutants and caches verdicts beside
+# it. Both are derived from the source and are rebuilt on every run.
+mutants/
+.mutmut-cache
+mutmut-stats.json

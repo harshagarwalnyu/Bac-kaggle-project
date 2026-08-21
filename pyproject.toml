@@ -121,4 +121,33 @@ ignore = [
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "mutmut>=3",
 ]
+
+# Mutation testing. Not part of any automatic run -- `mutation.yml` is
+# `workflow_dispatch` only -- because the number it produces is a research
+# result to read, not a merge gate to pass.
+#
+# What it answers that coverage cannot: coverage says a line ran, mutmut says
+# the suite *noticed* when that line changed. A test that executes a function
+# and asserts nothing scores 100% coverage and 0% here.
+[tool.mutmut]
+source_paths = ["src/connect4"]
+# Scoped to the two modules where a wrong answer is silent. The bitboard is
+# bit arithmetic with no readable failure mode -- an off-by-one in a shift
+# produces a plausible board, not a crash -- and the engine is the search that
+# rests on it. The API and the archive fail loudly and are covered by tests
+# that assert on responses, where a surviving mutant is far likelier to be
+# genuinely equivalent than a real gap.
+only_mutate = ["*connect4/bitboard.py", "*connect4/engine.py"]
+# The property tests are deliberately not in the selection, and this is the
+# one config line here that was decided by measurement rather than by taste.
+# Running the same 423 mutants with `tests/test_properties.py` added moved the
+# score by one mutant -- 265 killed to 266, plus one that only died by timing
+# out -- and took 2m58s against 1m50s for the selection below. Hypothesis
+# draws fresh examples on every invocation, so those last two are not
+# reliably reproducible either: 60% more wall clock buys a score that moves
+# between runs for reasons unrelated to the code. The property tests earn
+# their place under `pytest`; they do not earn it inside a loop that runs the
+# suite 423 times.
+pytest_add_cli_args_test_selection = ["tests/test_bitboard.py", "tests/test_engine.py"]

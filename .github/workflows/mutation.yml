@@ -1,0 +1,106 @@
+# Mutation testing, by hand only.
+#
+# The question this answers is the one coverage cannot: coverage says a line
+# ran, mutmut says the suite *noticed* when that line changed. A test that
+# executes `_alignment` and asserts nothing scores 100% coverage and 0% here.
+#
+# `workflow_dispatch` and nothing else. The result is a number to read, not a
+# gate to pass: wiring it into `pull_request` would add several minutes to
+# every PR to produce a score that moves for reasons unrelated to the diff.
+# Run it when the tests change shape, not when the code does.
+#
+# Baseline, measured 2026-08-21 on the two modules `[tool.mutmut]` selects:
+# 423 mutants, 265 killed, 156 survived, 2 with no covering test. Both
+# survivors in `bitboard.py` were checked by hand and are equivalent mutants
+# -- `pos & (pos << d)` detects a four-run exactly as `pos & (pos >> d)` does
+# -- so the bitboard is at 100% on mutants that can be killed at all. Every
+# other survivor is in `engine.py`, concentrated in `_negamax` (40),
+# `_analyse` (24) and `choose_move` (21).
+name: mutation
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_children:
+        description: "Parallel mutant workers (blank = one per core)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutmut:
+    name: mutmut
+    runs-on: ubuntu-latest
+    # A generous ceiling rather than the default six hours. If the run has not
+    # finished in an hour something is looping, and a job that hangs until the
+    # account's minutes run out is worse than one that fails.
+    timeout-minutes: 60
+
+    env:
+      UV_PYTHON: "3.14"
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # `dev` only, no `az`. The scope in `[tool.mutmut]` is the bitboard and
+      # the engine, and the tests selected for the loop import neither torch
+      # nor anything that needs it.
+      - name: Install the project and its dev tools
+        run: uv sync --extra dev --frozen
+
+      # A sanity gate before spending the CPU. mutmut classifies a mutant as
+      # killed when the suite fails, so if the suite is already failing every
+      # mutant is "killed" and the score is a lie. This is the check that makes
+      # the number below mean anything.
+      - name: Confirm the selected suite is green before mutating
+        run: uv run pytest tests/test_bitboard.py tests/test_engine.py -q --no-cov
+
+      - name: Run
+        # `|| true`: mutmut exits non-zero when mutants survive, which on a
+        # first baseline is the expected outcome and not a failure of the job.
+        # There is deliberately no threshold yet -- a floor picked before the
+        # first measurement is a guess, and a guess in CI is a thing people
+        # learn to override.
+        run: |
+          uv run mutmut run ${MAX_CHILDREN:+--max-children "$MAX_CHILDREN"} || true
+        env:
+          MAX_CHILDREN: ${{ inputs.max_children }}
+
+      - name: Summarise
+        # `if: always()` so a timed-out or crashed run still reports whatever
+        # it got through instead of leaving an empty summary.
+        if: always()
+        run: |
+          {
+            echo "## Mutation results"
+            echo
+            echo '```'
+            uv run mutmut results 2>&1 | tail -100 || echo "no results were produced"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The cache directory holds a verdict per mutant, which is what makes a
+      # surviving mutant readable after the fact -- `mutmut show <id>` needs
+      # it. Uploading it means the run can be inspected without re-running.
+      - name: Upload the mutant verdicts
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: mutmut-cache
+          path: |
+            .mutmut-cache
+            mutants/
+          retention-days: 14
+          if-no-files-found: warn
