@@ -491,7 +491,7 @@ entirely. Accuracy alone would have hidden that completely.
 ```bash
 uv sync --extra dev --extra az             # drop --extra az to skip torch
 uv run ruff check .                        # lint
-uv run python -m pytest                    # 484 tests (436 without --extra az)
+uv run python -m pytest                    # 500 tests (452 without --extra az)
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
 uv run python -m scripts.validate          # the three experiments above

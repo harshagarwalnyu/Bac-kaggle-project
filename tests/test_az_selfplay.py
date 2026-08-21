@@ -354,6 +354,38 @@ def test_openings_refuses_to_return_fewer_lines_than_asked_for():
     assert len(openings(49, 2)) == 49
 
 
+def test_every_opening_is_a_line_a_game_could_actually_contain():
+    """Deeper than a column is tall, which the old product-of-columns could not do.
+
+    `openings(1, 7)` used to be seven moves in column three; `from_moves`
+    rejects the seventh, and `play_games` calls `from_moves` on every line.
+    """
+    for plies in (1, 2, 6, 7, 10):
+        for line in openings(3, plies):
+            assert len(line) == plies
+            Position.from_moves(line)  # raises if the line is not playable
+
+
+def test_openings_are_positions_with_a_game_still_left_in_them():
+    """A line that already won or drew hands the two players nothing to play."""
+    for plies in (4, 7, 10):
+        for line in openings(5, plies):
+            position = Position.from_moves(line)
+            assert not position.has_won()
+            assert not position.is_draw()
+
+
+def test_the_supply_of_deep_openings_is_smaller_than_the_naive_count():
+    """WIDTH ** plies counts sequences no game can contain; this counts lines."""
+    with pytest.raises(ValueError, match=r"only \d+"):
+        openings(WIDTH**7, 7)
+
+
+def test_openings_rejects_a_negative_count():
+    with pytest.raises(ValueError, match="must not be negative"):
+        openings(-1, 2)
+
+
 def test_openings_rejects_a_zero_ply_request():
     with pytest.raises(ValueError, match="at least 1"):
         openings(4, 0)
