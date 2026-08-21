@@ -67,6 +67,13 @@ class Outcome:
     winner: int  # 1 = the side that moved first, 2 = the other, 0 = draw
     plies: int
     seconds: float
+    #: CPU time the game actually consumed. Wall clock alone cannot tell a slow
+    #: game from a sleeping laptop: Windows modern standby keeps
+    #: `perf_counter` running while the process is suspended, which is how one
+    #: overnight ablation game came back reading 24,032 seconds for a normal
+    #: 38-ply game. The two readings diverging is the signature, so both are
+    #: kept. Defaulted so a hand-built Outcome in a test need not supply it.
+    cpu_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -95,6 +102,29 @@ class Report:
     solver_multiple: float
     openings: list[tuple[int, ...]]
     outcomes: list[Outcome] = field(default_factory=list)
+
+
+#: How far a game's wall clock may exceed its CPU time before the gap is the
+#: machine rather than the search. These engines are single-threaded and
+#: compute-bound, so a healthy game spends nearly all its wall clock on a CPU.
+#: Four times over is well past scheduling noise and well under the fifty-times
+#: gap an actual suspend produces.
+SUSPEND_RATIO = 4.0
+
+
+def was_suspended(outcome: Outcome) -> bool:
+    """Did this game's wall clock run away from the work it actually did?
+
+    Windows modern standby does not stop ``perf_counter``, so a laptop that
+    sleeps mid-run hands back a game that reads as hours long and looks, in a
+    log, exactly like a pathologically slow search. One overnight run came back
+    with a normal 38-ply game timed at 24,032 seconds for precisely that
+    reason. ``process_time`` does not advance while suspended, so the two
+    disagreeing is the tell.
+    """
+    if outcome.cpu_seconds <= 0:
+        return False
+    return outcome.seconds > outcome.cpu_seconds * SUSPEND_RATIO
 
 
 def build_engine(skill: int, base_time_s: float, solver_multiple: float) -> Engine:
@@ -178,6 +208,7 @@ def play_game(
 
     pos = Position.from_moves(opening)
     started = time.perf_counter()
+    started_cpu = time.process_time()
 
     while not pos.is_draw():
         player = pos.current_player()
@@ -191,6 +222,7 @@ def play_game(
                 winner=player,
                 plies=pos.moves,
                 seconds=time.perf_counter() - started,
+                cpu_seconds=time.process_time() - started_cpu,
             )
 
     return Outcome(
@@ -200,6 +232,7 @@ def play_game(
         winner=0,
         plies=pos.moves,
         seconds=time.perf_counter() - started,
+        cpu_seconds=time.process_time() - started_cpu,
     )
 
 
@@ -466,6 +499,15 @@ def main() -> int:
     print(format_seats(report, SKILLS))
     print(format_answer(report, SOLVER_SKILL - 1, SOLVER_SKILL))
     print(f"\n{len(report.outcomes)} games in {elapsed:.1f}s")
+    asleep = [o for o in report.outcomes if was_suspended(o)]
+    if asleep:
+        # Said out loud rather than left in the timings: a suspended game's
+        # wall clock is not search time, and reads as a performance finding to
+        # anyone scanning the log later.
+        print(
+            f"{len(asleep)} of them ran while the machine was suspended; "
+            f"their times are wall clock, not search."
+        )
 
     if args.json:
         args.json.write_text(

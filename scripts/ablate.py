@@ -1,12 +1,24 @@
 """Which half of solver mode is doing the work: the clock, or the table?
 
 ``api.py`` builds difficulty 6 with two changes over difficulty 5 -- twelve
-times the time limit, and a transposition table that survives between moves --
-and a comment beside it asserts the table is "the bigger of the two". That is
-a plausible claim. Consecutive searches in one game really do overlap
-enormously, so a kept table really should turn each move into a continuation
-of the last rather than a fresh start. But it was never measured, and an
-unmeasured claim in shipped code is a guess wearing a lab coat.
+times the time limit, and a transposition table that survives between moves.
+A comment beside it used to assert the table was "the bigger of the two".
+That is a plausible claim -- consecutive searches in one game really do
+overlap -- but it was never measured, and an unmeasured claim in shipped code
+is a guess wearing a lab coat. This script measured it, and the guess was
+wrong twice over.
+
+At the shipped clock, over 36 games (`checkpoints/ablation/solver-1s.log`):
+the kept table *on its own* scores 5.5/18 against difficulty 5's 7.5/18. Not
+"contributes less than the clock" -- worse than not having it. A table carried
+across moves costs something, and a 1s search is not deep enough for the
+overlap to pay it back. The clock on its own scores 10.0/18, which is better
+but still recovers under half the gap to difficulty 6's 13.0/18.
+
+So neither knob is the answer: +2.5 and -2.0 separately, +5.5 together. The
+pair is superadditive, which is the only reading consistent with both halves.
+A kept table pays once searches are deep enough to overlap, and twelve times
+the clock is what makes them deep enough.
 
 So: cross the two knobs and play the four resulting configurations against
 each other.
@@ -17,8 +29,8 @@ each other.
     slow + kept    the difficulty 6 configuration
 
 The reading that matters is not who wins overall -- ``slow + kept`` will --
-but which single knob recovers more of the gap from ``fast + fresh``. If the
-comment is right, ``fast + kept`` outscores ``slow + fresh``.
+but how much of the gap from ``fast + fresh`` each single knob recovers, and
+whether the two shares add up to the whole. They do not.
 
 Same discipline as the tournament, for the same reasons: the engine is
 deterministic, so variation comes from a fixed-seed set of openings rather
@@ -27,13 +39,14 @@ because Connect 4 is a first-player win with perfect play; and every game gets
 a fresh engine, so no result depends on the order the matches ran in.
 
     uv run python -m scripts.ablate                      # scaled, ~minutes
-    uv run python -m scripts.ablate --time 1.0           # as shipped, slow
+    uv run python -m scripts.ablate --time 1.0 --max-seconds 5400   # as shipped
 """
 
 from __future__ import annotations
 
 import argparse
 import itertools
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -43,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from connect4.bitboard import Position
 from connect4.engine import MAX_PLIES, Engine, heuristic_evaluator
-from scripts.tournament import Outcome, Record, make_openings
+from scripts.tournament import Outcome, Record, make_openings, was_suspended
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +100,9 @@ class Report:
     outcomes: list[tuple[Config, Config, Outcome]] = field(default_factory=list)
 
 
+#: Printed beside a game whose wall clock ran far ahead of its CPU time.
+SUSPENDED_NOTE = "<- machine was asleep; wall clock is not search time"
+
 def play_game(
     first: Config,
     second: Config,
@@ -98,6 +114,7 @@ def play_game(
 
     pos = Position.from_moves(opening)
     started = time.perf_counter()
+    started_cpu = time.process_time()
 
     while not pos.is_draw():
         player = pos.current_player()
@@ -113,6 +130,7 @@ def play_game(
                 winner=player,
                 plies=pos.moves,
                 seconds=time.perf_counter() - started,
+                cpu_seconds=time.process_time() - started_cpu,
             )
 
     return Outcome(
@@ -122,16 +140,40 @@ def play_game(
         winner=0,
         plies=pos.moves,
         seconds=time.perf_counter() - started,
+        cpu_seconds=time.process_time() - started_cpu,
     )
 
 
-def run(report: Report, verbose: bool = True) -> Report:
+def run(report: Report, verbose: bool = True, max_seconds: float | None = None) -> Report:
+    """Play the round robin, opening by opening.
+
+    The loop is opening-major rather than pairing-major so that ``max_seconds``
+    can cut the run without tilting it. Every opening plays all twelve ordered
+    pairings, so a run stopped between openings is still a balanced design --
+    fewer openings, but every configuration has met every other one the same
+    number of times from each seat. Stopping mid-opening would hand whichever
+    configurations happened to be scheduled early a few extra games, and the
+    share-of-the-gap arithmetic downstream would silently divide by that.
+
+    ``--time 1.0`` is a run of hours, which is exactly when an unattended bound
+    is worth having.
+    """
+    if max_seconds is not None and not (math.isfinite(max_seconds) and max_seconds >= 0):
+        # argparse takes `nan` and `inf` as floats without complaint, and both
+        # quietly disable the bound: every comparison against nan is false, and
+        # nothing is ever >= inf. A negative budget is the opposite failure --
+        # it stops after one opening no matter what was asked for. All three
+        # produce a run that does not match its command line, which is worse
+        # than a run that refuses to start.
+        raise ValueError(f"max_seconds must be a finite, non-negative number, got {max_seconds!r}")
+
     pairs = list(itertools.permutations(configs(report.solver_multiple), 2))
     total = len(pairs) * len(report.openings)
     played = 0
+    started = time.perf_counter()
 
-    for first, second in pairs:
-        for opening in report.openings:
+    for index, opening in enumerate(report.openings, start=1):
+        for first, second in pairs:
             outcome = play_game(first, second, opening, report.base_time_s)
             report.outcomes.append((first, second, outcome))
             played += 1
@@ -141,9 +183,20 @@ def run(report: Report, verbose: bool = True) -> Report:
                 )
                 print(
                     f"  [{played:>3}/{total}] {first.label} vs {second.label}: "
-                    f"{result:>6} in {outcome.plies} plies, {outcome.seconds:5.1f}s",
+                    f"{result:>6} in {outcome.plies} plies, {outcome.seconds:5.1f}s"
+                    + (" " + SUSPENDED_NOTE if was_suspended(outcome) else ""),
                     flush=True,
                 )
+
+        elapsed = time.perf_counter() - started
+        if max_seconds is not None and elapsed >= max_seconds and index < len(report.openings):
+            report.openings = report.openings[:index]
+            print(
+                f"\n  stopping after {index} of the requested openings: "
+                f"{elapsed:.0f}s past the {max_seconds:g}s budget.",
+                flush=True,
+            )
+            break
     return report
 
 
@@ -170,6 +223,22 @@ def format_report(report: Report) -> str:
         f"  {'config':<10}{'clock':>8}{'table':>8}{'w-d-l':>10}{'points':>9}",
         "  " + "-" * 45,
     ]
+    asleep = [outcome for _, _, outcome in report.outcomes if was_suspended(outcome)]
+    if asleep:
+        # Above the scores, not below them, because it changes how to read the
+        # timings and possibly whether the run was bounded as asked: the budget
+        # is measured in wall clock, so a suspend spends it without playing.
+        lines += [
+            "",
+            (
+                f"  {len(asleep)} of {len(report.outcomes)} games ran while the "
+                f"machine was suspended."
+            ),
+            "  Their wall clock is not search time, and any --max-seconds budget was",
+            "  consumed by the sleep rather than by games.",
+            "",
+        ]
+
     for config in order:
         record = table[config.name]
         lines.append(
@@ -231,9 +300,9 @@ def verdict(
 
     margin = 0.1
     if table_share > clock_share + margin:
-        lines.append("  The persistent table is the bigger of the two, as api.py claims.")
+        lines.append("  The persistent table is the bigger of the two.")
     elif clock_share > table_share + margin:
-        lines.append("  The clock is the bigger of the two here, which api.py's comment denies.")
+        lines.append("  The clock is the bigger of the two here.")
     else:
         lines.append("  Neither knob dominates within the margin of this sample.")
 
@@ -258,6 +327,12 @@ def main() -> int:
     parser.add_argument("--openings", type=int, default=4)
     parser.add_argument("--opening-plies", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="stop after the first whole opening that finishes past this budget",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -275,7 +350,7 @@ def main() -> int:
     )
 
     started = time.perf_counter()
-    run(report, verbose=not args.quiet)
+    run(report, verbose=not args.quiet, max_seconds=args.max_seconds)
     print(format_report(report))
     print(f"\n{len(report.outcomes)} games in {time.perf_counter() - started:.1f}s")
     return 0

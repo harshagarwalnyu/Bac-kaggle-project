@@ -178,17 +178,48 @@ Connect 4 is solved — the first player wins by move 41 with perfect play. Skil
 is a separate mode rather than another notch on the dial, because what changes is
 the *budget*, not the move choice: twelve times the clock (`CONNECT4_TIME_LIMIT`
 is 1.0s, `CONNECT4_SOLVER_TIME_LIMIT` is 12.0s), and a transposition table that
-persists between moves. Consecutive searches in one game overlap enormously, so
-keeping the table turns each move into a continuation of the last rather than a
-fresh start. Entries are keyed by position, not by search, so the reuse is sound.
+persists between moves. Entries are keyed by position, not by search, so the
+reuse is sound. Whether the reuse is *worth* anything is measured below, and
+the answer is less obvious than it looks.
 
-Which of the two knobs actually buys the strength is a fair question and
-`scripts/ablate.py` exists to answer it — it crosses the two and plays the four
-resulting configurations against each other. At a scaled-down clock the clock
-wins that comparison and the table contributes nothing measurable, but that run
-is a hostile test for the table: search overlap between consecutive moves is
-precisely what a persistent table sells, and overlap grows with the budget. Run
-it at `--time 1.0` before believing either answer.
+Which of the two knobs actually buys the strength was, for a long time, a
+comment asserting the table was the bigger of the two. `scripts/ablate.py`
+crosses the knobs and plays the four resulting configurations against each
+other, and it has now been run at the shipped clock — 3 openings, both seats,
+36 games, `--time 1.0`:
+
+| config | clock | table | w-d-l | points |
+|---|---|---|---|---|
+| L5 | 1× | fresh | 7-1-10 | 7.5/18 |
+| clock | 12× | fresh | 10-0-8 | 10.0/18 |
+| **table** | 1× | kept | 5-1-12 | **5.5/18** |
+| L6 | 12× | kept | 13-0-5 | 13.0/18 |
+
+**The old comment was wrong, and so was the obvious replacement for it.** The
+persistent table on its own does not merely fail to explain difficulty 6's
+strength — it scores *below* the configuration it was supposed to improve.
+Keeping a table across moves is not free: entries from a shallower earlier
+search occupy it and get hit, and at a 1s clock the searches are not deep
+enough for genuine overlap to pay that back.
+
+But the clock alone does not explain it either. L5 to L6 is a 5.5-point
+separation and the clock recovers 2.5 of it; the table recovers −2.0; the two
+together recover all 5.5. The knobs are superadditive, which is the one
+reading consistent with both halves: a table across moves pays only once the
+searches are deep enough to overlap, and twelve times the clock is what makes
+them deep enough. Neither knob is the answer. The interaction is.
+
+Read with the sample in mind: ±2.1 points of standard error on each score at
+18 games per config, so the clock-versus-table difference is about 1.5 standard
+errors — suggestive, not settled. The L5-to-L6 gap itself is about 2.6, which
+is the part worth trusting.
+
+One footnote on the timings, because it cost a night to learn: the script
+records CPU time beside the wall clock and flags any game where the two
+diverge. An earlier overnight run reported a normal 38-ply game at 24,032
+seconds, which is a laptop entering modern standby — Windows suspends the
+process without stopping `perf_counter`. Since `--max-seconds` is a wall-clock
+budget, a suspend spends the budget without playing anything.
 
 It does **not** claim a solve from the empty board — proving that takes billions of
 nodes, which CPython is not going to do inside a web request. Walking a full game
@@ -314,11 +345,16 @@ src/connect4/
   model.py      MLP written from scratch in NumPy — forward, backward, Adam
   history.py    append-only JSONL archive of finished games
   api.py        FastAPI; a game is stored as its move list, not as a board
+  az/           AlphaZero: PUCT search, policy-value net, self-play, arena
+                (the only torch code in the project, and an optional extra)
 web/            vanilla HTML/CSS/JS; the DOM is a pure function of one state object
 web/tests/      32 front-end tests; no dependencies, no build step
 scripts/train.py     trains the evaluator, against two baselines
 scripts/validate.py  the experiments above
-tests/          348 tests
+scripts/az_pretrain.py  warm-starts the value head on solver-exact labels
+scripts/train_az.py     the self-play loop: play, learn, gate, promote
+scripts/az_arena.py     grades a checkpoint against fixed opponents
+tests/          484 tests (436 without the optional `az` extra)
 .github/        the workflow that runs both suites on every push
 ```
 
@@ -362,6 +398,109 @@ whose colour keys contradicted the marks they explained, and a refused move that
 still let the bot reply — costing a tempo and wiping the error message that
 explained the refusal.
 
+## AlphaZero mode (`connect4.az`)
+
+The MLP above is a *classifier*. It reads a position and predicts the
+game-theoretic result, and the front end draws it as blue bars — but it does not
+choose moves. Every move the shipped bot plays comes from alpha-beta with a
+hand-written evaluator. That is the honest state of the project, and it is the
+gap this package closes.
+
+`src/connect4/az/` is a self-contained AlphaZero implementation: a policy-value
+network, PUCT search that uses the policy as a prior and the value in place of a
+rollout, and a self-play loop that trains on the search's own visit counts.
+
+**The framework rule changed here, deliberately.** `connect4.model` is a
+hand-written NumPy MLP because a small dense classifier is genuinely legible
+when you write the backward pass yourself. A residual convolutional tower
+trained by self-play is not that; hand-rolling conv backprop would teach nobody
+anything and would very likely be subtly wrong. So this package uses PyTorch,
+as an **optional extra**. Playing a game against the shipped bot still needs
+neither torch nor any of these files.
+
+```bash
+uv sync --extra az
+uv run python -m scripts.az_pretrain                     # warm-start the value head
+uv run python -m scripts.train_az --iterations 20        # self-play
+uv run python -m scripts.az_arena checkpoints/az/champion.pt
+```
+
+**Sized for the machine, not for the paper.** AlphaGo Zero used 20 residual
+blocks of 256 filters. The default here is 3 blocks of 32 — about 60k
+parameters — because on an 8-core CPU the bottleneck is not capacity, it is how
+many self-play games per hour the network can generate. Measured on a batch of
+128 boards, best of 15: 64×4 gives 5,479 boards/s, 32×3 gives 17,943. Going
+wider costs 3.3× the time for 5× the parameters, and that time is games not
+played.
+
+**The gate is the whole safety mechanism.** Each iteration trains a challenger,
+plays it against the reigning champion over a book of forced openings from both
+seats, and promotes only on a score of 0.55 or better. Training loss is *not*
+evidence of strength here — it is measured against targets the network's own
+search produced, so it says how self-consistent the network is and nothing
+about whether it plays better. `scripts/az_arena.py` reports the number that
+does mean something: the score against the shipped alpha-beta engine at each
+skill level, plus a *uniform-search* control that runs the same MCTS with a
+network that knows nothing. That control is what separates what the network
+contributed from what the search contributed.
+
+**The warm start uses real labels, and only where they apply.** The UCI file is
+67,557 positions with solver-exact outcomes, so `scripts/az_pretrain.py` fits
+the value head to them before self-play begins. It does **not** touch the policy
+head: the file says who wins, not which move to play, so there is no policy
+target in it and inventing one would defeat the point of using real data. On the
+run recorded here it took validation MSE from 0.731 (predict the mean) to 0.188,
+with 94% sign agreement on decisive positions. The trunk is shared, so the
+policy head still starts from a representation that has seen exact labels.
+
+### What it actually plays like
+
+Twenty iterations of 200 self-play games, starting from the warm-started value
+head. Thirteen challengers cleared the gate and **seven were thrown away** — the
+gate is filtering, not rubber-stamping, which is the only reason the chain of
+"better than the last one" means anything. Policy loss fell monotonically from
+1.509 to 1.178 across the run, and the whole thing took 24 minutes on 4 CPU
+threads.
+
+The final champion, 40 games per opponent, 200 simulations per move, engine on a
+0.05s clock:
+
+| opponent | score | record |
+|---|---|---|
+| random | 1.000 | 40-0-0 |
+| **uniform search** | **0.950** | 36-4-0 |
+| engine, skill 0–2 | 1.000 | 40-0-0 |
+| engine, skill 3 | 0.988 | 39-1-0 |
+| engine, skill 4 | 0.925 | 37-0-3 |
+| engine, skill 5 | 0.625 | 22-6-12 |
+
+The uniform-search control is the one to read first. Same MCTS, same 200
+simulations, flat priors and zero values — 0.950 against it means the *network*
+is carrying the result and not the search wrapped around it.
+
+**The engine's clock is the caveat, and it moves the numbers.** At 0.05s a move
+the engine is on a twentieth of what it ships with. Re-run against skill 5 at the
+shipped 1.0s and the score falls from 0.625 to 0.500 (3-2-3 over 8 games). The
+learned player is competitive with difficulty 5, not past it.
+
+**Skill 6 is not a skill number.** `Engine.choose_move` branches on `skill >= 5`,
+so asking the arena for skill 6 returns the skill 5 player under a different
+label. Difficulty 6 is an *engine*: twelve times the clock and a transposition
+table that survives between moves. `--solver` is what builds it — and against
+that, the real one, the network **loses**:
+
+| opponent | score | record |
+|---|---|---|
+| solver mode (12s a move, persistent table) | 0.250 | 1-2-5 |
+
+That is the result to quote. Twenty iterations of self-play on 4 CPU threads
+produced a 59,834-parameter network that outplays the heuristic evaluator at
+every difficulty below 5, draws level with it at difficulty 5 on an equal
+clock, and is still comfortably beaten by the same evaluator given twelve
+times the thinking time and a table it can keep. Search budget is doing more
+work here than representation, which is the honest reading of a small net
+trained for 24 minutes.
+
 ## The model
 
 `(98 → 128 → 64 → 3)`, ≈21k parameters. He init, ReLU, numerically stable softmax,
@@ -381,9 +520,9 @@ entirely. Accuracy alone would have hidden that completely.
 ## Reproducing
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra az             # drop --extra az to skip torch
 uv run ruff check .                        # lint
-uv run python -m pytest                    # 348 tests
+uv run python -m pytest                    # 500 tests (452 without --extra az)
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install
 uv run python -m scripts.train             # downloads the data, trains, prints baselines
 uv run python -m scripts.validate          # the three experiments above

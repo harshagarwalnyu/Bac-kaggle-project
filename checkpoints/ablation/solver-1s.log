@@ -1,0 +1,58 @@
+3 openings, both seats, 4 configurations
+base clock 1s, solver multiple 12x
+
+  [  1/36] fast+fresh vs slow+fresh:     L5 in 41 plies, 119.2s
+  [  2/36] fast+fresh vs fast+kept:  table in 32 plies,  22.7s
+  [  3/36] fast+fresh vs slow+kept:     L6 in 36 plies, 108.4s
+  [  4/36] slow+fresh vs fast+fresh:     L5 in 38 plies,  90.9s
+  [  5/36] slow+fresh vs fast+kept:  clock in 37 plies, 112.4s
+  [  6/36] slow+fresh vs slow+kept:     L6 in 36 plies, 212.2s
+  [  7/36] fast+kept vs fast+fresh:     L5 in 38 plies,  23.7s
+  [  8/36] fast+kept vs slow+fresh:  clock in 38 plies, 114.4s
+  [  9/36] fast+kept vs slow+kept:  table in 35 plies,  88.3s
+  [ 10/36] slow+kept vs fast+fresh:     L6 in 39 plies, 108.3s
+  [ 11/36] slow+kept vs slow+fresh:  clock in 38 plies, 210.5s
+  [ 12/36] slow+kept vs fast+kept:     L6 in 37 plies, 111.0s
+  [ 13/36] fast+fresh vs slow+fresh:  clock in 38 plies,  83.4s
+  [ 14/36] fast+fresh vs fast+kept:  table in 34 plies,  16.9s
+  [ 15/36] fast+fresh vs slow+kept:     L6 in 38 plies,  71.4s
+  [ 16/36] slow+fresh vs fast+fresh:  clock in 39 plies,  84.1s
+  [ 17/36] slow+fresh vs fast+kept:  clock in 37 plies,  82.6s
+  [ 18/36] slow+fresh vs slow+kept:     L6 in 38 plies, 152.2s
+  [ 19/36] fast+kept vs fast+fresh:     L5 in 30 plies,  14.6s
+  [ 20/36] fast+kept vs slow+fresh:  clock in 30 plies,  87.2s
+  [ 21/36] fast+kept vs slow+kept:     L6 in 32 plies,  85.6s
+  [ 22/36] slow+kept vs fast+fresh:     L6 in 39 plies,  82.1s
+  [ 23/36] slow+kept vs slow+fresh:  clock in 32 plies, 115.9s
+  [ 24/36] slow+kept vs fast+kept:     L6 in 37 plies,  81.1s
+  [ 25/36] fast+fresh vs slow+fresh:     L5 in 35 plies,  77.2s
+  [ 26/36] fast+fresh vs fast+kept:   draw in 42 plies,  22.2s
+  [ 27/36] fast+fresh vs slow+kept:     L5 in 35 plies,  72.8s
+  [ 28/36] slow+fresh vs fast+fresh:  clock in 31 plies,  88.4s
+  [ 29/36] slow+fresh vs fast+kept:  clock in 31 plies,  88.9s
+  [ 30/36] slow+fresh vs slow+kept:     L6 in 38 plies, 159.3s
+  [ 31/36] fast+kept vs fast+fresh:     L5 in 42 plies,  18.2s
+  [ 32/36] fast+kept vs slow+fresh:  table in 35 plies,  75.4s
+  [ 33/36] fast+kept vs slow+kept:  table in 35 plies,  74.1s
+  [ 34/36] slow+kept vs fast+fresh:     L6 in 31 plies,  78.0s
+  [ 35/36] slow+kept vs slow+fresh:     L6 in 35 plies, 118.7s
+  [ 36/36] slow+kept vs fast+kept:     L6 in 33 plies,  88.3s
+
+Which knob buys the strength
+
+  config       clock   table     w-d-l   points
+  ---------------------------------------------
+  L5              1x   fresh    7-1-10   7.5/18
+  clock          12x   fresh    10-0-8  10.0/18
+  table           1x    kept    5-1-12   5.5/18
+  L6             12x    kept    13-0-5  13.0/18
+
+  Share of the level-5-to-level-6 gap each knob recovers on its own:
+
+    clock       45%
+    table      -36%
+
+  +/- 2.1 points of standard error on each score (18 games per config).
+  The clock is the bigger of the two here.
+
+36 games in 3243.3s

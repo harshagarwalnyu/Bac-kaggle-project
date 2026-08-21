@@ -1,0 +1,72 @@
+{
+  "games": 40,
+  "simulations": 200,
+  "engine_time": 0.05,
+  "checkpoints": {
+    "checkpoints/az/champion.pt": {
+      "random": {
+        "wins": 40,
+        "draws": 0,
+        "losses": 0,
+        "score": 1.0,
+        "seconds": 12.9
+      },
+      "uniform-search": {
+        "wins": 36,
+        "draws": 4,
+        "losses": 0,
+        "score": 0.95,
+        "seconds": 30.4
+      },
+      "engine-skill-0": {
+        "wins": 40,
+        "draws": 0,
+        "losses": 0,
+        "score": 1.0,
+        "seconds": 29.7
+      },
+      "engine-skill-1": {
+        "wins": 40,
+        "draws": 0,
+        "losses": 0,
+        "score": 1.0,
+        "seconds": 31.1
+      },
+      "engine-skill-2": {
+        "wins": 40,
+        "draws": 0,
+        "losses": 0,
+        "score": 1.0,
+        "seconds": 32.3
+      },
+      "engine-skill-3": {
+        "wins": 39,
+        "draws": 1,
+        "losses": 0,
+        "score": 0.988,
+        "seconds": 35.5
+      },
+      "engine-skill-4": {
+        "wins": 37,
+        "draws": 0,
+        "losses": 3,
+        "score": 0.925,
+        "seconds": 41.7
+      },
+      "engine-skill-5": {
+        "wins": 22,
+        "draws": 6,
+        "losses": 12,
+        "score": 0.625,
+        "seconds": 44.8
+      },
+      "engine-skill-6": {
+        "wins": 24,
+        "draws": 4,
+        "losses": 12,
+        "score": 0.65,
+        "seconds": 45.3
+      }
+    }
+  }
+}

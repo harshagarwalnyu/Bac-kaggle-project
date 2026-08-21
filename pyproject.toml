@@ -19,6 +19,23 @@ dev = [
     # starts failing because the tool moved is a lint nobody trusts.
     "ruff>=0.16.3,<0.17",
 ]
+az = [
+    "torch>=2.6",
+]
+
+# Torch from PyTorch's CPU index rather than PyPI. The PyPI Linux wheel
+# declares the whole CUDA stack as hard dependencies -- cuda-toolkit, cudnn,
+# nccl, triton -- which is several gigabytes to install a thing that will only
+# ever run on a CPU here. No machine in this project has an NVIDIA card, and
+# the CI runner certainly does not. Same wheel content on Windows, where PyPI
+# torch is CPU-only anyway.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [build-system]
 requires = ["hatchling"]
@@ -30,6 +47,10 @@ packages = ["src/connect4"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# The repository root, so `tests/` can import the `scripts/` entry points. The
+# package itself is installed and does not need this; the scripts are not a
+# package and are not meant to be.
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["src/connect4"]
