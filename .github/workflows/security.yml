@@ -78,19 +78,6 @@ jobs:
     # Pull requests only. The action diffs the dependency manifest against the
     # base branch, and on a push to `main` there is no base to diff against.
     if: github.event_name == 'pull_request'
-    # Non-blocking, and only until someone turns the feature on. The action
-    # reads GitHub's dependency graph rather than the lockfile, so with the
-    # graph disabled it cannot run at all:
-    #
-    #   Dependency review is not supported on this repository. Please ensure
-    #   that Dependency graph is enabled
-    #
-    # That is a repository setting, not something a workflow can fix, and a
-    # check that is red for a reason no diff can address is a check people
-    # learn to ignore. Settings -> Code security -> Dependency graph -> Enable,
-    # then delete this line: the job works from the next PR onward and the
-    # `fail-on-severity` gate below starts meaning something.
-    continue-on-error: true
 
     permissions:
       contents: read
@@ -100,6 +87,26 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - uses: actions/dependency-review-action@v5.0.0
+        # Non-blocking, and only until someone turns the feature on. The action
+        # reads GitHub's dependency graph rather than the lockfile, so with the
+        # graph disabled it cannot run at all:
+        #
+        #   Dependency review is not supported on this repository. Please
+        #   ensure that Dependency graph is enabled
+        #
+        # That is a repository setting, not something a workflow can fix, and a
+        # check that is red for a reason no diff can address is a check people
+        # learn to scroll past -- which then hides the real advisory when one
+        # lands. Settings -> Code security -> Dependency graph -> Enable, then
+        # delete this line and `fail-on-severity` starts meaning something.
+        #
+        # On the step rather than the job deliberately. Job-level
+        # `continue-on-error` keeps the *workflow* green but still reports the
+        # job's own conclusion as `failure`, so the check stays red on the pull
+        # request -- measured on run 32493231734, where the workflow succeeded
+        # and the job did not. On the step, the job succeeds and the log still
+        # carries the reason.
+        continue-on-error: true
         with:
           # A new dependency carrying a high-severity advisory should stop the
           # merge; the existing tree is a separate conversation and is not this
