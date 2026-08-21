@@ -462,7 +462,7 @@ that, the real one, the network **loses**:
 |---|---|---|
 | solver mode (12s a move, persistent table) | 0.250 | 1-2-5 |
 
-That is the result to quote. Twenty iterations of self-play on eight CPU cores
+That is the result to quote. Twenty iterations of self-play on 4 CPU threads
 produced a 59,834-parameter network that outplays the heuristic evaluator at
 every difficulty below 5, draws level with it at difficulty 5 on an equal
 clock, and is still comfortably beaten by the same evaluator given twelve
@@ -489,7 +489,7 @@ entirely. Accuracy alone would have hidden that completely.
 ## Reproducing
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra az             # drop --extra az to skip torch
 uv run ruff check .                        # lint
 uv run python -m pytest                    # 484 tests (436 without --extra az)
 node --test web/tests/app.test.js          # 32 front-end tests, no npm install

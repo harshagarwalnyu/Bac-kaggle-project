@@ -314,3 +314,46 @@ def test_the_engine_beats_random_convincingly():
     engine = EnginePlayer(Engine(time_limit_s=0.05), skill=5)
     record = match(engine, RandomPlayer(np.random.default_rng(0)), games=6)
     assert record.score > 0.8
+
+
+# --------------------------------------------------------------------------
+# Regressions from the review of the AlphaZero branch.
+
+
+def test_openings_generates_the_depth_it_was_asked_for():
+    """The old implementation returned two-move lines whatever `plies` said.
+
+    `match` forwards `opening_plies` straight through, so a caller asking for
+    deeper openings silently got the shallow ones and never found out.
+    """
+    for plies in range(1, 5):
+        lines = openings(4, plies)
+        assert len(lines) == 4
+        assert {len(line) for line in lines} == {plies}
+
+
+def test_openings_are_distinct_at_every_depth():
+    for plies in range(1, 4):
+        lines = openings(WIDTH**plies, plies)
+        assert len({tuple(line) for line in lines}) == len(lines)
+
+
+def test_openings_still_fans_out_from_the_centre():
+    """Column 3 is the only winning first move; the order must still start there."""
+    assert openings(3, 1) == [[3], [2], [4]]
+    assert openings(2, 2) == [[3, 3], [3, 2]]
+
+
+def test_openings_refuses_to_return_fewer_lines_than_asked_for():
+    """Truncating silently would report a 40-game score computed from 14 games."""
+    with pytest.raises(ValueError, match="only 7"):
+        openings(8, 1)
+    with pytest.raises(ValueError, match="only 49"):
+        openings(50, 2)
+    # One short of the cap is fine, so the boundary is not off by one.
+    assert len(openings(49, 2)) == 49
+
+
+def test_openings_rejects_a_zero_ply_request():
+    with pytest.raises(ValueError, match="at least 1"):
+        openings(4, 0)

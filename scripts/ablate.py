@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -140,6 +141,15 @@ def run(report: Report, verbose: bool = True, max_seconds: float | None = None) 
     ``--time 1.0`` is a run of hours, which is exactly when an unattended bound
     is worth having.
     """
+    if max_seconds is not None and not (math.isfinite(max_seconds) and max_seconds >= 0):
+        # argparse takes `nan` and `inf` as floats without complaint, and both
+        # quietly disable the bound: every comparison against nan is false, and
+        # nothing is ever >= inf. A negative budget is the opposite failure --
+        # it stops after one opening no matter what was asked for. All three
+        # produce a run that does not match its command line, which is worse
+        # than a run that refuses to start.
+        raise ValueError(f"max_seconds must be a finite, non-negative number, got {max_seconds!r}")
+
     pairs = list(itertools.permutations(configs(report.solver_multiple), 2))
     total = len(pairs) * len(report.openings)
     played = 0

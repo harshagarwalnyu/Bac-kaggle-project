@@ -19,6 +19,7 @@ from both sides, which is the same trick ``scripts/tournament.py`` uses.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -61,18 +62,31 @@ class Record:
 
 
 def openings(count: int, plies: int = 2) -> list[list[int]]:
-    """Distinct opening move sequences, centre-first.
+    """Distinct opening move sequences of ``plies`` moves, centre-first.
 
     Centre-first because the openings should be positions a real game might
     reach: starting every test game with a1 would measure how the two players
     handle nonsense rather than how they play. Column 3 is Connect 4's only
     winning first move, and the order fans out from it.
+
+    There are only ``WIDTH ** plies`` distinct lines of a given depth, so a
+    request for more than that cannot be met. Raising beats truncating: the
+    caller sizes a match by this number, and quietly returning fewer lines
+    would report a 40-game score computed from 14 games.
+
+    Generated lazily. ``plies`` of 10 is 282 million sequences, and the caller
+    almost always wants the first handful.
     """
+    if plies < 1:
+        raise ValueError(f"plies must be at least 1, got {plies}")
+    available = WIDTH**plies
+    if count > available:
+        raise ValueError(
+            f"asked for {count} distinct {plies}-ply openings, "
+            f"but there are only {available}"
+        )
     order = sorted(range(WIDTH), key=lambda c: abs(c - WIDTH // 2))
-    if plies <= 1:
-        return [[c] for c in order[:count]]
-    pairs = [[a, b] for a in order for b in order]
-    return pairs[:count]
+    return [list(line) for line in itertools.islice(itertools.product(order, repeat=plies), count)]
 
 
 def play_games(

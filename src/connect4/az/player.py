@@ -68,7 +68,7 @@ class AZPlayer:
     def choose_move(self, position: Position) -> int:
         search = self.search(position)
         if self.temperature <= 0:
-            return int(np.argmax(search.visit_counts()))
+            return search.best_move()
         return int(self.rng.choice(len(search.root.prior), p=search.policy(self.temperature)))
 
     def search(self, position: Position) -> Search:
@@ -86,7 +86,7 @@ class AZPlayer:
         """
         searches = [Search(p, self.config, self.rng) for p in positions]
         run_batch(searches, self.evaluate)
-        return [int(np.argmax(s.visit_counts())) for s in searches]
+        return [s.best_move() for s in searches]
 
 
 def value_evaluator(

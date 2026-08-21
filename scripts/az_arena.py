@@ -43,7 +43,7 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePath
 
 import numpy as np
 
@@ -171,7 +171,11 @@ def main(argv: list[str] | None = None) -> int:
             simulations=args.simulations,
             rng=np.random.default_rng(args.seed),
         )
-        report["checkpoints"][str(path)] = grade(player, args, np.random.default_rng(args.seed))
+        # `as_posix`, not `str`: the key is a label in a committed report, and
+        # keying it on the host's separator makes a Windows run and a Linux run
+        # of the same checkpoint look like two different checkpoints.
+        key = PurePath(path).as_posix()
+        report["checkpoints"][key] = grade(player, args, np.random.default_rng(args.seed))
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,7 @@
   "simulations": 200,
   "engine_time": 1.0,
   "checkpoints": {
-    "checkpoints\\az\\champion.pt": {
+    "checkpoints/az/champion.pt": {
       "random": {
         "wins": 8,
         "draws": 0,

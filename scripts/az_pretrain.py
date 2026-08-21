@@ -106,6 +106,36 @@ def load_value_dataset(
     return boards, values
 
 
+def split_problem(train: int, val: int, batch_size: int) -> str | None:
+    """Why this train/validation split cannot be trained on, or ``None``.
+
+    Both failures are silent rather than loud, which is why they are worth
+    catching here. An empty validation split makes ``baseline`` the mean of an
+    empty array -- ``nan`` -- and every subsequent ``val_loss < best_loss``
+    comparison false, so the run trains to completion and writes nothing. A
+    training split that yields no batches divides by a zero count instead.
+    Both are reachable from the documented ``--limit``: at the default
+    validation fraction ``--limit 5`` empties the validation split, and
+    ``--limit 1`` empties the training one.
+    """
+    if val < 1:
+        return (
+            f"the validation split is empty: {train + val} positions at this "
+            f"--val-fraction rounds down to zero. Raise --limit or --val-fraction."
+        )
+    if batch_size < 2:
+        # A chunk of one is dropped by `supervised_batches` -- BatchNorm cannot
+        # compute a variance from a single row -- so a batch size of one drops
+        # every chunk.
+        return f"--batch-size must be at least 2, got {batch_size}"
+    if train < 2:
+        return (
+            f"the training split holds {train} position(s), and a batch of one "
+            f"is dropped because BatchNorm needs at least two. Raise --limit."
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_threads(args.threads)
@@ -116,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
 
     order = rng.permutation(len(boards))
     cut = int(len(order) * args.val_fraction)
+    problem = split_problem(train=len(order) - cut, val=cut, batch_size=args.batch_size)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
     val_index, train_index = order[:cut], order[cut:]
     train_boards, train_values = boards[train_index], values[train_index]
     val_boards = torch.from_numpy(boards[val_index])
@@ -212,6 +246,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.patience and epoch - best_epoch >= args.patience:
             print(f"no improvement in {args.patience} epochs; stopping")
             break
+
+    if best_epoch == 0:
+        # Reachable: `improved` compares against `inf`, so this only happens
+        # when every epoch produced a non-finite loss. Saying "saved to ..."
+        # here would name a file that does not exist, or worse, an older one
+        # from a previous run that this run did not touch.
+        print("no epoch improved on the initial loss; nothing was saved.", file=sys.stderr)
+        return 1
 
     print(
         f"best epoch {best_epoch} at val MSE {best_loss:.4f} "

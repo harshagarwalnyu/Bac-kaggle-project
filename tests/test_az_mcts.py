@@ -421,3 +421,63 @@ def test_batched_and_single_stepping_agree():
     batched = Search(Position.from_moves([3, 2]), config)
     run_batch([batched], uniform_batch)
     assert np.array_equal(single.visit_counts(), batched.visit_counts())
+
+
+# --------------------------------------------------------------------------
+# Regressions from the review of the AlphaZero branch.
+
+
+def _full_first_column() -> Position:
+    """Column 0 full, the rest of the board open, and nobody has won.
+
+    Two discs per column at a time, so the stones in each column alternate
+    owners and no vertical four appears. Only two columns are touched, so
+    there is nothing horizontal or diagonal to worry about either.
+    """
+    position = Position.from_moves([0, 0, 1, 1] * (HEIGHT // 2))
+    assert not position.has_won()
+    return position
+
+
+def test_best_move_never_names_a_full_column():
+    """The failure this guards against is a hang, not a wrong move.
+
+    The first simulation expands the root and credits no edge, so at one
+    simulation every visit count is zero and a bare ``argmax`` returns column
+    0. ``arena.play_games`` applies that column and loops until the board is
+    won or drawn -- a full column changes nothing, so the loop never ends.
+    """
+    position = _full_first_column()
+    assert 0 not in position.legal_moves()
+
+    search = Search(position, quiet(simulations=1), np.random.default_rng(0))
+    run_batch([search], uniform_batch)
+
+    assert search.visit_counts().sum() == 0, "the premise: one simulation credits nothing"
+    assert int(np.argmax(search.visit_counts())) == 0, "the premise: argmax picks the full column"
+    assert search.best_move() in position.legal_moves()
+
+
+def test_best_move_picks_the_most_visited_column():
+    """The mask must not change the answer in the ordinary case."""
+
+    def prefers_column_five(positions: list[Position]) -> tuple[np.ndarray, np.ndarray]:
+        n = len(positions)
+        priors = np.full((n, WIDTH), 0.01, dtype=np.float32)
+        priors[:, 5] = 1.0 - 0.01 * (WIDTH - 1)
+        return priors, np.zeros(n, dtype=np.float32)
+
+    search = Search(Position(), quiet(simulations=64), np.random.default_rng(0))
+    run_batch([search], prefers_column_five)
+
+    counts = search.visit_counts()
+    assert counts.argmax() == 5, "the premise: the prior steered the visits"
+    assert search.best_move() == 5
+
+
+def test_best_move_refuses_a_position_with_nothing_to_play():
+    """A drawn board reaches the root with no legal move. Better to say so."""
+    search = Search(Position(), quiet(simulations=1), np.random.default_rng(0))
+    search.root.legal = []
+    with pytest.raises(ValueError, match="no legal move"):
+        search.best_move()

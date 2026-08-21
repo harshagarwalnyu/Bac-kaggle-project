@@ -280,6 +280,22 @@ class Search:
     def root_value(self) -> float:
         return self.root.value()
 
+    def best_move(self) -> int:
+        """The most-visited legal column.
+
+        The legality mask is not decoration. The first simulation expands the
+        root and credits no edge, so at ``simulations=1`` every count is still
+        zero and a bare ``argmax`` returns column 0 -- whether or not column 0
+        has room. The caller then plays it, the board silently fails to change,
+        and a game loop that waits for a win or a draw waits forever. Ties
+        among equal counts break toward the centre, which is the order
+        ``legal`` is already in.
+        """
+        if not self.root.legal:
+            raise ValueError("no legal move: the root position is already over")
+        counts = self.root.visits
+        return max(self.root.legal, key=lambda column: counts[column])
+
     def policy(self, temperature: float = 1.0) -> np.ndarray:
         """Visit counts as a probability distribution.
 

@@ -26,8 +26,10 @@ can regenerate, and a buffer written by an older champion is exactly the stale
 data step 1 exists to avoid. The first iteration after a resume is therefore
 data-starved and usually fails its gate. That is correct, not a bug.
 
-**Interrupting is safe.** Ctrl-C between iterations writes the champion out
-before exiting; the worst case is losing the current iteration's games.
+**Interrupting is safe.** Not because Ctrl-C saves anything -- it prints and
+exits 130 -- but because there is nothing left to save: every promotion writes
+the champion to disk the moment it happens. The worst case is losing the
+current iteration's games.
 """
 
 from __future__ import annotations
@@ -196,7 +198,14 @@ def main(argv: list[str] | None = None) -> int:
             # would make every subsequent gate a network playing itself.
             champion.load_state_dict(challenger.state_dict())
             champion.save(args.out / CHAMPION)
-            cache = CachedEvaluator(Evaluator(champion), capacity=2_000_000)
+            # Empty it rather than rebuild it. The wrapped `Evaluator` holds
+            # `champion` by reference, so the in-place `load_state_dict` above
+            # is already visible through it -- and a fresh `CachedEvaluator`
+            # would arrive with `hits` and `misses` at zero, so the hit rate
+            # logged a few lines down would read 0.0 on exactly the iterations
+            # that promoted, throwing away the measurement for the run's more
+            # interesting half.
+            cache.clear()
 
         elapsed = time.perf_counter() - started
         entry = {
