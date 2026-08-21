@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from connect4.bitboard import Position
 from connect4.engine import MAX_PLIES, Engine, heuristic_evaluator
-from scripts.tournament import Outcome, Record, make_openings
+from scripts.tournament import Outcome, Record, make_openings, was_suspended
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,29 +102,6 @@ class Report:
 
 #: Printed beside a game whose wall clock ran far ahead of its CPU time.
 SUSPENDED_NOTE = "<- machine was asleep; wall clock is not search time"
-
-#: How far wall clock may exceed CPU time before the gap is the machine rather
-#: than the search. The engines here are single-threaded and compute-bound, so
-#: a healthy game spends nearly all its wall clock on a CPU. Four times over is
-#: well past any plausible scheduling noise and well under the fifty-times gap
-#: an actual suspend produces.
-SUSPEND_RATIO = 4.0
-
-
-def was_suspended(outcome: Outcome) -> bool:
-    """Did this game's wall clock run away from the work it actually did?
-
-    Windows modern standby does not stop ``perf_counter``, so a laptop that
-    sleeps mid-run hands back a game that reads as hours long and looks, in a
-    log, exactly like a pathologically slow search. One overnight run of this
-    script came back with a normal 38-ply game timed at 24,032 seconds for
-    precisely that reason. ``process_time`` does not advance while suspended,
-    so the two disagreeing is the tell.
-    """
-    if outcome.cpu_seconds <= 0:
-        return False
-    return outcome.seconds > outcome.cpu_seconds * SUSPEND_RATIO
-
 
 def play_game(
     first: Config,

@@ -16,7 +16,7 @@ import itertools
 
 import pytest
 
-from scripts import ablate
+from scripts import ablate, tournament
 from scripts.tournament import Outcome
 
 
@@ -204,3 +204,15 @@ def test_the_report_says_so_before_it_shows_the_scores(monkeypatch):
     text = ablate.format_report(report)
     assert "12 of 12 games ran while the machine was suspended" in text
     assert text.index("suspended") < text.index("did not separate")
+
+
+def test_the_suspend_check_is_the_tournament_s_own():
+    """One definition, not two.
+
+    ``Outcome`` lives in the tournament and ``ablate`` imports from it, so the
+    check that reads ``Outcome.cpu_seconds`` belongs there too -- putting it in
+    ``ablate`` and importing it back would be a cycle. The tournament runs for
+    hours and has exactly the same exposure to a sleeping laptop, so it needs
+    the check regardless of whether an ablation is running.
+    """
+    assert ablate.was_suspended is tournament.was_suspended
