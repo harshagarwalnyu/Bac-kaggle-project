@@ -78,6 +78,19 @@ jobs:
     # Pull requests only. The action diffs the dependency manifest against the
     # base branch, and on a push to `main` there is no base to diff against.
     if: github.event_name == 'pull_request'
+    # Non-blocking, and only until someone turns the feature on. The action
+    # reads GitHub's dependency graph rather than the lockfile, so with the
+    # graph disabled it cannot run at all:
+    #
+    #   Dependency review is not supported on this repository. Please ensure
+    #   that Dependency graph is enabled
+    #
+    # That is a repository setting, not something a workflow can fix, and a
+    # check that is red for a reason no diff can address is a check people
+    # learn to ignore. Settings -> Code security -> Dependency graph -> Enable,
+    # then delete this line: the job works from the next PR onward and the
+    # `fail-on-severity` gate below starts meaning something.
+    continue-on-error: true
 
     permissions:
       contents: read
