@@ -67,6 +67,13 @@ class Outcome:
     winner: int  # 1 = the side that moved first, 2 = the other, 0 = draw
     plies: int
     seconds: float
+    #: CPU time the game actually consumed. Wall clock alone cannot tell a slow
+    #: game from a sleeping laptop: Windows modern standby keeps
+    #: `perf_counter` running while the process is suspended, which is how one
+    #: overnight ablation game came back reading 24,032 seconds for a normal
+    #: 38-ply game. The two readings diverging is the signature, so both are
+    #: kept. Defaulted, because the tournament does not measure it.
+    cpu_seconds: float = 0.0
 
 
 @dataclass(slots=True)

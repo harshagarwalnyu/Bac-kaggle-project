@@ -165,3 +165,42 @@ def test_a_scaled_down_run_says_so_and_a_full_clock_does_not():
 def test_the_standard_error_grows_with_the_square_root_of_the_sample():
     assert ablate.standard_error(4) == pytest.approx(1.0)
     assert ablate.standard_error(400) == pytest.approx(10.0)
+
+
+# --------------------------------------------------------------------------
+# Telling a slow game from a sleeping laptop.
+
+
+def make_outcome(seconds: float, cpu_seconds: float) -> Outcome:
+    return Outcome(
+        first=0, second=0, opening=(3,), winner=1, plies=38,
+        seconds=seconds, cpu_seconds=cpu_seconds,
+    )
+
+
+def test_a_game_that_spent_its_wall_clock_computing_is_not_flagged():
+    assert not ablate.was_suspended(make_outcome(seconds=110.0, cpu_seconds=108.0))
+
+
+def test_the_real_overnight_anomaly_is_flagged():
+    """24,032s of wall clock for a 38-ply game, on a laptop that slept."""
+    assert ablate.was_suspended(make_outcome(seconds=24032.2, cpu_seconds=470.0))
+
+
+def test_a_game_with_no_cpu_reading_is_not_flagged():
+    """`cpu_seconds` defaults to zero, and a default is not evidence."""
+    assert not ablate.was_suspended(make_outcome(seconds=24032.2, cpu_seconds=0.0))
+
+
+def test_the_report_says_so_before_it_shows_the_scores(monkeypatch):
+    """Whoever reads the timings needs to know the clock lied first."""
+    def fake(first, second, opening, base_time_s):
+        return make_outcome(seconds=24032.2, cpu_seconds=470.0)
+
+    monkeypatch.setattr(ablate, "play_game", fake)
+    report = make_report(openings=1)
+    ablate.run(report, verbose=False)
+
+    text = ablate.format_report(report)
+    assert "12 of 12 games ran while the machine was suspended" in text
+    assert text.index("suspended") < text.index("did not separate")

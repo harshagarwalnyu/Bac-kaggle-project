@@ -89,6 +89,32 @@ class Report:
     outcomes: list[tuple[Config, Config, Outcome]] = field(default_factory=list)
 
 
+#: Printed beside a game whose wall clock ran far ahead of its CPU time.
+SUSPENDED_NOTE = "<- machine was asleep; wall clock is not search time"
+
+#: How far wall clock may exceed CPU time before the gap is the machine rather
+#: than the search. The engines here are single-threaded and compute-bound, so
+#: a healthy game spends nearly all its wall clock on a CPU. Four times over is
+#: well past any plausible scheduling noise and well under the fifty-times gap
+#: an actual suspend produces.
+SUSPEND_RATIO = 4.0
+
+
+def was_suspended(outcome: Outcome) -> bool:
+    """Did this game's wall clock run away from the work it actually did?
+
+    Windows modern standby does not stop ``perf_counter``, so a laptop that
+    sleeps mid-run hands back a game that reads as hours long and looks, in a
+    log, exactly like a pathologically slow search. One overnight run of this
+    script came back with a normal 38-ply game timed at 24,032 seconds for
+    precisely that reason. ``process_time`` does not advance while suspended,
+    so the two disagreeing is the tell.
+    """
+    if outcome.cpu_seconds <= 0:
+        return False
+    return outcome.seconds > outcome.cpu_seconds * SUSPEND_RATIO
+
+
 def play_game(
     first: Config,
     second: Config,
@@ -100,6 +126,7 @@ def play_game(
 
     pos = Position.from_moves(opening)
     started = time.perf_counter()
+    started_cpu = time.process_time()
 
     while not pos.is_draw():
         player = pos.current_player()
@@ -115,6 +142,7 @@ def play_game(
                 winner=player,
                 plies=pos.moves,
                 seconds=time.perf_counter() - started,
+                cpu_seconds=time.process_time() - started_cpu,
             )
 
     return Outcome(
@@ -124,6 +152,7 @@ def play_game(
         winner=0,
         plies=pos.moves,
         seconds=time.perf_counter() - started,
+        cpu_seconds=time.process_time() - started_cpu,
     )
 
 
@@ -166,7 +195,8 @@ def run(report: Report, verbose: bool = True, max_seconds: float | None = None) 
                 )
                 print(
                     f"  [{played:>3}/{total}] {first.label} vs {second.label}: "
-                    f"{result:>6} in {outcome.plies} plies, {outcome.seconds:5.1f}s",
+                    f"{result:>6} in {outcome.plies} plies, {outcome.seconds:5.1f}s"
+                    + (" " + SUSPENDED_NOTE if was_suspended(outcome) else ""),
                     flush=True,
                 )
 
@@ -214,6 +244,21 @@ def format_report(report: Report) -> str:
             f"{record!s:>10}"
             f"{record.points:>6.1f}/{record.played}"
         )
+
+    asleep = [outcome for _, _, outcome in report.outcomes if was_suspended(outcome)]
+    if asleep:
+        # Above the scores, not below them, because it changes how to read the
+        # timings and possibly whether the run was bounded as asked: the budget
+        # is measured in wall clock, so a suspend spends it without playing.
+        lines += [
+            "",
+            (
+                f"  {len(asleep)} of {len(report.outcomes)} games ran while the "
+                f"machine was suspended."
+            ),
+            "  Their wall clock is not search time, and any --max-seconds budget was",
+            "  consumed by the sleep rather than by games.",
+        ]
 
     floor = table["L5"].points
     ceiling = table["L6"].points
