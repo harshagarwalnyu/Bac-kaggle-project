@@ -28,6 +28,10 @@ from connect4.bitboard import HEIGHT, WIDTH, Position
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    import numpy as np
+
+    from connect4.engine import Engine
+
 
 class Player(Protocol):
     """Anything that can pick moves for several independent positions at once.
@@ -218,7 +222,7 @@ class EnginePlayer:
 
     __slots__ = ("engine", "skill")
 
-    def __init__(self, engine, skill: int = 5) -> None:
+    def __init__(self, engine: Engine, skill: int = 5) -> None:
         self.engine = engine
         self.skill = skill
 
@@ -235,7 +239,7 @@ class RandomPlayer:
 
     __slots__ = ("rng",)
 
-    def __init__(self, rng) -> None:
+    def __init__(self, rng: np.random.Generator) -> None:
         self.rng = rng
 
     def choose_moves(self, positions: Sequence[Position]) -> list[int]:

@@ -24,10 +24,11 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Protocol, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -35,8 +36,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from connect4.bitboard import WIDTH, Position
-from connect4.engine import MAX_PLIES, Analysis, Engine, heuristic_evaluator
-from connect4.history import GameHistory
+from connect4.engine import MAX_PLIES, Analysis, Engine, MoveEvaluation, heuristic_evaluator
+from connect4.history import GameHistory, GameRecord
 from connect4.model import MLP, NeuralEvaluator
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -177,8 +178,29 @@ class BotMoveRequest(BaseModel):
 # Serialisation
 # --------------------------------------------------------------------------
 
+# The shape every route hands back. Named rather than spelled out fifteen
+# times, and `Any` because the values genuinely are heterogeneous: a payload
+# holds ints, strings, bools and nested lists of move objects side by side.
+JsonDict = dict[str, Any]
 
-def describe_game(game: Game) -> dict:
+
+class Evaluator(Protocol):
+    """What the analysis panel needs from a leaf evaluator.
+
+    Two unrelated classes satisfy this: :class:`~connect4.model.NeuralEvaluator`
+    wrapping a trained network, and the null stand-in used when no model file
+    is present. Neither inherits from the other and neither should -- the null
+    one is not a degenerate network, it is a different thing that answers the
+    same two questions. A structural type says exactly that, where naming the
+    concrete class said something that was never true.
+    """
+
+    def __call__(self, pos: Position) -> float: ...
+
+    def probabilities(self, pos: Position) -> dict[str, float]: ...
+
+
+def describe_game(game: Game) -> JsonDict:
     """The whole client-visible truth about a game."""
     pos = game.position
     # ``has_won`` speaks about the side that just moved.
@@ -213,7 +235,7 @@ def describe_game(game: Game) -> dict:
     }
 
 
-def describe_analysis(analysis: Analysis, pos: Position, evaluator: NeuralEvaluator) -> dict:
+def describe_analysis(analysis: Analysis, pos: Position, evaluator: Evaluator) -> JsonDict:
     """Both brains' opinion of every column, from the mover's point of view.
 
     The two are computed from the same position but are genuinely independent:
@@ -282,7 +304,7 @@ def describe_analysis(analysis: Analysis, pos: Position, evaluator: NeuralEvalua
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Load the network once, at startup.
 
     If the model file is missing the app still starts and still plays -- it
@@ -360,6 +382,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Connect 4 glass-box bot", lifespan=lifespan)
 
 
+# What identifies a cached analysis. Named because it appears in four
+# signatures and a bare tuple in each of them is four chances to disagree.
+type AnalysisKey = tuple[int, bool, bool]
+
+
 class AnalysisCache:
     """Remembers the search's answer for a position, so it is never asked twice.
 
@@ -382,7 +409,12 @@ class AnalysisCache:
     """
 
     def __init__(self, capacity: int = 512) -> None:
-        self._entries: dict[tuple[int, bool], Analysis] = {}
+        # (position key, solver mode, capped budget). Solver and capped are
+        # part of the key because they change the answer: the solver engine
+        # keeps its table across searches, and a capped search is allowed to
+        # stop shallower. Two analyses of one position under different budgets
+        # are two different results and must not share a slot.
+        self._entries: dict[AnalysisKey, Analysis] = {}
         self._capacity = capacity
         # The warmer writes from its own thread while requests read and write
         # from FastAPI's threadpool, so every method here is called
@@ -407,7 +439,7 @@ class AnalysisCache:
             self.hits = 0
             self.misses = 0
 
-    def peek(self, key: tuple[int, bool]) -> Analysis | None:
+    def peek(self, key: AnalysisKey) -> Analysis | None:
         """Look without counting.
 
         The background thread asks whether a position is already known, and
@@ -415,7 +447,7 @@ class AnalysisCache:
         with self._lock:
             return self._entries.get(key)
 
-    def get(self, key: tuple[int, bool]) -> Analysis | None:
+    def get(self, key: AnalysisKey) -> Analysis | None:
         with self._lock:
             found = self._entries.get(key)
             if found is None:
@@ -424,7 +456,7 @@ class AnalysisCache:
                 self.hits += 1
             return found
 
-    def put(self, key: tuple[int, bool], analysis: Analysis) -> None:
+    def put(self, key: AnalysisKey, analysis: Analysis) -> None:
         # Two threads racing on the same key can only ever store the same
         # value, so the store itself was never the hazard; the eviction that
         # follows it is, and so are the counters. See ``__init__``.
@@ -580,7 +612,8 @@ def _engine_for(skill: int) -> Engine:
     """Solver mode gets the long-budget engine; every other skill gets the
     normal one. Difficulty below 5 is chosen from the *same* honest analysis,
     so there is no reason to think less about it."""
-    return app.state.solver if skill >= SOLVER_SKILL else app.state.engine
+    engine = app.state.solver if skill >= SOLVER_SKILL else app.state.engine
+    return cast(Engine, engine)
 
 
 def _analyse(pos: Position, skill: int, capped: bool = False) -> Analysis:
@@ -607,14 +640,15 @@ def _analyse(pos: Position, skill: int, capped: bool = False) -> Analysis:
 
     # A full-budget answer is at least as deep as a capped one and is already
     # paid for, so it serves either caller. The reverse never holds.
-    full_key = (pos.key(), solver, False)
-    cached = app.state.analysis_cache.get(full_key)
+    full_key: AnalysisKey = (pos.key(), solver, False)
+    cache = cast(AnalysisCache, app.state.analysis_cache)
+    cached = cache.get(full_key)
     if cached is not None:
         return cached
 
-    key = (pos.key(), solver, capped) if capped else full_key
+    key: AnalysisKey = (pos.key(), solver, capped) if capped else full_key
     if capped:
-        cached = app.state.analysis_cache.get(key)
+        cached = cache.get(key)
         if cached is not None:
             return cached
 
@@ -626,7 +660,7 @@ def _analyse(pos: Position, skill: int, capped: bool = False) -> Analysis:
     return analysis
 
 
-def _analysis_payload(pos: Position, skill: int = 5) -> dict | None:
+def _analysis_payload(pos: Position, skill: int = 5) -> JsonDict | None:
     """Analyse ``pos``, or return ``None`` if the game is already over.
 
     This is the *advisory* search -- what the panel shows and what the assist
@@ -664,7 +698,7 @@ def _archive(game: Game) -> None:
     )
 
 
-def _respond(game: Game, **extra) -> dict:
+def _respond(game: Game, **extra: Any) -> JsonDict:
     """The one shape every game endpoint returns.
 
     Centralised so that "archive finished games" is a property of the API
@@ -724,7 +758,7 @@ _NULL_EVALUATOR = _NullEvaluator()
 
 
 @app.get("/api/health")
-def health() -> dict:
+def health() -> JsonDict:
     return {
         "ok": True,
         "model_loaded": app.state.model_loaded,
@@ -736,7 +770,7 @@ def health() -> dict:
 
 
 @app.post("/api/games")
-def new_game(request: NewGameRequest) -> dict:
+def new_game(request: NewGameRequest) -> JsonDict:
     opening = list(request.moves or ())
     if opening:
         # Validated before any state is created, so a rejected opening leaves
@@ -757,12 +791,12 @@ def new_game(request: NewGameRequest) -> dict:
 
 
 @app.get("/api/games/{game_id}")
-def get_game(game_id: str) -> dict:
+def get_game(game_id: str) -> JsonDict:
     return _respond(app.state.store.get(game_id))
 
 
 @app.post("/api/games/{game_id}/moves")
-def play_move(game_id: str, request: MoveRequest) -> dict:
+def play_move(game_id: str, request: MoveRequest) -> JsonDict:
     game = app.state.store.get(game_id)
 
     # The whole check-and-append is one critical section. Validating outside
@@ -789,7 +823,7 @@ def play_move(game_id: str, request: MoveRequest) -> dict:
 
 
 @app.post("/api/games/{game_id}/bot-move")
-def bot_move(game_id: str, request: BotMoveRequest) -> dict:
+def bot_move(game_id: str, request: BotMoveRequest) -> JsonDict:
     game = app.state.store.get(game_id)
 
     # Held across the search too, not just the checks. The search is the slow
@@ -855,7 +889,7 @@ def _pick(analysis: Analysis, skill: int) -> int:
     index = min(5 - skill, len(ranked) - 1)
     candidate = ranked[index]
 
-    def losing(move) -> bool:
+    def losing(move: MoveEvaluation) -> bool:
         return bool(move.exact and move.score < 0 and (move.mate_in or 99) <= 2)
 
     # Floor 2: never walk into a loss the bot can see when something safe
@@ -876,7 +910,7 @@ def _pick(analysis: Analysis, skill: int) -> int:
 
 
 @app.post("/api/games/{game_id}/undo")
-def undo(game_id: str) -> dict:
+def undo(game_id: str) -> JsonDict:
     """Take back a full turn, so that it is the human's move again.
 
     Popping a fixed two plies is wrong whenever the bot moved first: that game
@@ -919,7 +953,7 @@ def undo(game_id: str) -> dict:
 # --------------------------------------------------------------------------
 
 
-def describe_record(record) -> dict:
+def describe_record(record: GameRecord) -> JsonDict:
     """A past game, in list form.
 
     The move list travels with every entry because it is what makes the record
@@ -942,7 +976,7 @@ def describe_record(record) -> dict:
 
 
 @app.get("/api/history")
-def list_history(limit: int = 25) -> dict:
+def list_history(limit: int = 25) -> JsonDict:
     limit = max(1, min(limit, 200))
     history: GameHistory = app.state.history
     return {
@@ -952,7 +986,7 @@ def list_history(limit: int = 25) -> dict:
 
 
 @app.get("/api/history/{record_id}")
-def get_history_entry(record_id: str) -> dict:
+def get_history_entry(record_id: str) -> JsonDict:
     record = app.state.history.get(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="no such archived game")
@@ -971,7 +1005,7 @@ class RematchRequest(BaseModel):
 
 
 @app.post("/api/history/{record_id}/rematch")
-def rematch(record_id: str, request: RematchRequest) -> dict:
+def rematch(record_id: str, request: RematchRequest) -> JsonDict:
     """Start a fresh game from an archived one.
 
     The archive stores move lists rather than boards precisely so that this is
@@ -1021,7 +1055,7 @@ def rematch(record_id: str, request: RematchRequest) -> dict:
 
 
 @app.delete("/api/history")
-def clear_history() -> dict:
+def clear_history() -> JsonDict:
     app.state.history.clear()
     return {"cleared": True, "summary": app.state.history.summary()}
 

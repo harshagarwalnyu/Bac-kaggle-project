@@ -355,6 +355,9 @@ def build_dataset(
     if cache:
         np.savez_compressed(
             cache_path,
-            **{f"{name}_{part}": arr for name, pair in splits.items() for part, arr in zip("xy", pair)},
+            # savez_compressed's stub types **kwds against `allow_pickle: bool`,
+            # so a mapping of arrays cannot be spread into it without complaint.
+            # This is the documented way to write a named-array archive.
+            **{f"{name}_{part}": arr for name, pair in splits.items() for part, arr in zip("xy", pair)},  # type: ignore[arg-type]
         )
     return splits

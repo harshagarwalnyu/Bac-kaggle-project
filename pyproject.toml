@@ -18,6 +18,10 @@ dev = [
     # Pinned to a minor: ruff adds rules in every release, and a lint that
     # starts failing because the tool moved is a lint nobody trusts.
     "ruff>=0.16.3,<0.17",
+    # Same reasoning as ruff: mypy tightens inference between minors, and a
+    # type error that appears because the checker moved is not a type error.
+    "mypy>=1.18,<1.19",
+    "hypothesis>=6.140",
 ]
 az = [
     "torch>=2.6",
@@ -68,9 +72,51 @@ exclude_also = [
     "raise NotImplementedError",
 ]
 
+# Strict, and scoped to the library rather than the whole tree. `src/connect4`
+# is the thing other code imports and the thing the API contract rests on; the
+# scripts under `scripts/` are one-shot entry points whose signatures are their
+# argparse block. Checking those to the same standard buys annotations on
+# `main(argv)` and little else.
+#
+# CI never ran a type checker before this, which is why `AnalysisCache` spent
+# its whole life annotated for a 2-tuple key while all seven call sites passed
+# a 3-tuple. Nothing broke, because nothing was inconsistent -- but nothing
+# would have told us either.
+[tool.mypy]
+files = ["src/connect4"]
+python_version = "3.14"
+strict = true
+
+[[tool.mypy.overrides]]
+# numpy and torch ship their own types, but both lean on overloads that
+# `--strict` reads more literally than the runtime does. Untyped calls into
+# them are still reported; what is silenced is the demand that every expression
+# crossing the boundary come back with a concrete parameterised type.
+module = ["numpy.*", "torch.*", "unlzw3"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+
+[tool.ruff.lint]
+# `S` is flake8-bandit: the same checks Bandit ships, run by the linter that is
+# already installed and already in CI. A second tool with a second config and a
+# second baseline file to buy the same findings is not worth the runtime.
+extend-select = ["S"]
+ignore = [
+    # Non-cryptographic randomness, flagged in the game samplers and the
+    # benchmark harness. Every one of them seeds a `random.Random` to make a
+    # run reproducible. Reproducibility is the requirement; unpredictability
+    # would be a bug here, not a feature.
+    "S311",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Asserts are how a test states its claim. Flagging 643 of them says nothing
+# about this codebase, and a rule that fires on every file it touches is a
+# rule people learn to scroll past.
+"tests/*" = ["S101"]
 
 [dependency-groups]
 dev = [

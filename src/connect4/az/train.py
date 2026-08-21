@@ -205,7 +205,8 @@ def train(
         )
 
         opt.zero_grad(set_to_none=True)
-        total.backward()
+        # torch's autograd entry points are untyped in the shipped stubs.
+        total.backward()  # type: ignore[no-untyped-call]
         # Self-play data contains the occasional position whose value target is
         # wildly at odds with what the network currently believes -- a game that
         # turned on one move. Clipping keeps one such sample from undoing an
