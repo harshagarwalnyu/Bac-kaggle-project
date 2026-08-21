@@ -53,6 +53,10 @@ MAX_PLIES = WIDTH * HEIGHT
 # the three we have is what makes table reuse sound rather than subtly wrong.
 EXACT, LOWER_BOUND, UPPER_BOUND = 0, 1, 2
 
+# One transposition-table row: how deep the search went, what it scored, which
+# kind of bound that score is, and the column that produced it.
+type TableEntry = tuple[int, float, int, int]
+
 Evaluator = Callable[[Position], float]
 
 # Sort key for move ordering, hoisted so the sort stays in C instead of
@@ -178,7 +182,8 @@ class Engine:
         self.time_limit_s = time_limit_s
         self.persist_table = persist_table
         self.table_capacity = table_capacity
-        self._table: dict[int, tuple[int, float, int, bool]] = {}
+        # (depth searched, score, bound kind, best column).
+        self._table: dict[int, TableEntry] = {}
         #
         # A search keeps its deadline, its statistics and its table on ``self``,
         # which is fine for one caller and wrong for two. FastAPI runs synchronous
@@ -418,7 +423,7 @@ class Engine:
         return best_score
 
     def _ordered_moves(
-        self, pos: Position, playable: int, cached, depth: int
+        self, pos: Position, playable: int, cached: TableEntry | None, depth: int
     ) -> Iterator[tuple[int, Position]]:
         """Yield candidate moves best first, each with the position it leads to.
 

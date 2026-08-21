@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -40,7 +41,10 @@ from .dataset import LABELS, N_FEATURES, encode
 
 
 def relu(z: np.ndarray) -> np.ndarray:
-    return np.maximum(z, 0.0)
+    # numpy's ufunc overloads degrade to `Any` for an unparameterised ndarray
+    # input, so the checker cannot tell this is still an array. Narrowing here
+    # keeps the honest signature instead of letting `Any` leak into callers.
+    return cast(np.ndarray, np.maximum(z, 0.0))
 
 
 def relu_grad(z: np.ndarray) -> np.ndarray:
@@ -58,7 +62,7 @@ def softmax(z: np.ndarray) -> np.ndarray:
     """
     shifted = z - z.max(axis=1, keepdims=True)
     exponentiated = np.exp(shifted)
-    return exponentiated / exponentiated.sum(axis=1, keepdims=True)
+    return cast(np.ndarray, exponentiated / exponentiated.sum(axis=1, keepdims=True))
 
 
 def cross_entropy(probabilities: np.ndarray, targets: np.ndarray) -> float:
@@ -82,10 +86,14 @@ class Layer:
     weights: np.ndarray
     biases: np.ndarray
     # Adam's first and second moment estimates, one pair per parameter array.
-    m_w: np.ndarray = field(default=None)  # type: ignore[assignment]
-    v_w: np.ndarray = field(default=None)  # type: ignore[assignment]
-    m_b: np.ndarray = field(default=None)  # type: ignore[assignment]
-    v_b: np.ndarray = field(default=None)  # type: ignore[assignment]
+    # Allocated in __post_init__ from the shape of `weights`, which is not
+    # known before then. `init=False` says that; the previous `default=None`
+    # said the field could hold None, which it never can, and needed a
+    # suppression comment on every line to keep the checker quiet about it.
+    m_w: np.ndarray = field(init=False)
+    v_w: np.ndarray = field(init=False)
+    m_b: np.ndarray = field(init=False)
+    v_b: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
         self.m_w = np.zeros_like(self.weights)
@@ -249,7 +257,7 @@ class MLP:
         for index, layer in enumerate(self.layers):
             arrays[f"w{index}"] = layer.weights
             arrays[f"b{index}"] = layer.biases
-        np.savez_compressed(path, **arrays)
+        np.savez_compressed(path, **arrays)  # type: ignore[arg-type]
 
     @classmethod
     def load(cls, path: Path) -> MLP:

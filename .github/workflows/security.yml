@@ -1,0 +1,153 @@
+# Pattern-level security scanning, and a gate on what new dependencies bring
+# with them.
+#
+# Separate from `codeql.yml` because the two answer different questions and
+# fail for unrelated reasons. CodeQL asks where a value can flow; Semgrep asks
+# whether a line matches a known-bad shape. Splitting them means a red badge
+# already says which kind of problem it is.
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Same reasoning as CodeQL: the rules move faster than the code.
+    - cron: "41 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+      contents: read
+
+    # The published image, rather than the action. `semgrep/semgrep-action` is
+    # archived, and every current recipe for it routes through Semgrep AppSec
+    # Platform, which wants an account and a `SEMGREP_APP_TOKEN`. The OSS
+    # engine and the public rule packs need neither.
+    #
+    # Pinned by digest, not by tag. A tag is a pointer the publisher can move,
+    # and a scanner is exactly the wrong place to accept a silently different
+    # binary: it runs on every push with the repository checked out. The digest
+    # below is the multi-arch image index for 1.174.0, read from the registry
+    # rather than copied from anywhere. To move it:
+    #
+    #   crane digest semgrep/semgrep:<version>
+    #
+    # The tag stays in the comment because a bare sha256 tells a reader nothing
+    # about how old it is.
+    container:
+      image: semgrep/semgrep@sha256:f1f7b71861c7b28b6e0f661225a2c4f58a484f5d0f182465c6d6b3b22f972ade
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        # No step here pushes, so the workflow token has no business sitting
+        # in `.git/config` for the rest of the job. Checkout persists it there
+        # by default, where anything that later archives the workspace -- an
+        # artifact upload, a cache save -- carries the credential out with it.
+        with:
+          persist-credentials: false
+
+      - name: Scan
+        # `--sarif` rather than a failing exit code. Semgrep's public packs are
+        # tuned for breadth across every framework they cover, so on any one
+        # repository a share of the hits will be irrelevant. Blocking the merge
+        # on that teaches people to bypass the job; filing it in the Security
+        # tab means it gets triaged instead of dismissed.
+        #
+        # `|| true` guards the exit code only. A crash still produces no SARIF,
+        # and the upload below fails loudly on a missing file.
+        run: |
+          semgrep scan \
+            --config=p/default \
+            --config=p/python \
+            --config=p/secrets \
+            --sarif --output=semgrep.sarif \
+            --metrics=off \
+            . || true
+
+      - name: Check the scan produced results
+        # Distinguishes "scanned, found nothing" from "never ran". Without this
+        # a crashed scanner and a clean repository look identical, which is the
+        # failure mode that makes a security job worthless.
+        run: |
+          test -s semgrep.sarif || { echo "semgrep produced no SARIF -- the scan did not run"; exit 1; }
+
+      - name: Upload to the Security tab
+        uses: github/codeql-action/upload-sarif@v4.37.7
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  dependency-review:
+    name: dependency review
+    runs-on: ubuntu-latest
+    # Pull requests only. The action diffs the dependency manifest against the
+    # base branch, and on a push to `main` there is no base to diff against.
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        # No step here pushes, so the workflow token has no business sitting
+        # in `.git/config` for the rest of the job. Checkout persists it there
+        # by default, where anything that later archives the workspace -- an
+        # artifact upload, a cache save -- carries the credential out with it.
+        with:
+          persist-credentials: false
+
+      - name: Is the dependency graph switched on?
+        # The action reads GitHub's dependency graph, not the lockfile, and
+        # with the graph disabled it does not degrade -- it fails outright:
+        #
+        #   Dependency review is not supported on this repository. Please
+        #   ensure that Dependency graph is enabled
+        #
+        # That is a repository setting no workflow can change. The previous
+        # shape of this job was a blanket `continue-on-error: true` on the
+        # action, which did make the check green, but at the cost of swallowing
+        # every other failure with it -- including the one thing the job exists
+        # to catch, a new dependency carrying a high-severity advisory.
+        #
+        # So ask first. The SBOM endpoint is the graph's own read API and
+        # returns 404 for exactly the repositories where the action cannot run,
+        # which turns "skip" into a decision with a reason rather than a
+        # blindfold. Once the graph is enabled the probe starts returning 200,
+        # the action runs, and `fail-on-severity` begins meaning something --
+        # with no edit to this file.
+        #
+        # Settings -> Code security -> Dependency graph -> Enable.
+        id: graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" --silent 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Dependency graph is disabled on this repository, so dependency review cannot run. Settings -> Code security -> Dependency graph -> Enable."
+          fi
+
+      - uses: actions/dependency-review-action@v5.0.0
+        # Blocking when it runs at all. No `continue-on-error`: the step above
+        # already removed the one failure that was never about the diff.
+        if: steps.graph.outputs.enabled == 'true'
+        with:
+          # A new dependency carrying a high-severity advisory should stop the
+          # merge; the existing tree is a separate conversation and is not this
+          # job's to have.
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure

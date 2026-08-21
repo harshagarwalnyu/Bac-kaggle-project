@@ -37,6 +37,12 @@ jobs:
       UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v7
+        # No step here pushes, so the workflow token has no business sitting
+        # in `.git/config` for the rest of the job. Checkout persists it there
+        # by default, where anything that later archives the workspace -- an
+        # artifact upload, a cache save -- carries the credential out with it.
+        with:
+          persist-credentials: false
 
       # Exact version, not a major: setup-uv stopped publishing the moving
       # `vN` tag after v7, so `@v10` does not resolve.
@@ -55,14 +61,38 @@ jobs:
         run: uv sync --extra dev --extra az --frozen
 
       # Lint first: it takes a second and it fails for reasons a diff can fix.
+      # `ruff check` now includes the `S` (flake8-bandit) rules, so this is the
+      # security lint as well; there is no separate Bandit step to add.
       - name: Lint
         run: uv run ruff check .
+
+      # Then types, before the tests. A type error is cheaper to read than a
+      # test failure caused by one, and `--strict` over `src/connect4` is what
+      # `[tool.mypy]` in pyproject already says -- no flags here, so the check
+      # is identical to the one a contributor runs locally.
+      - name: Type check
+        run: uv run mypy
 
       # `--cov` alone; the source and the 95% floor live in pyproject so the
       # gate is the same number locally and here. A threshold that only exists
       # in CI is one nobody can reproduce before pushing.
       - name: Test
-        run: uv run pytest --cov
+        run: uv run pytest --cov --cov-report=xml
+
+      # The 95% floor in pyproject is the gate; Codecov is the view -- which
+      # lines a pull request stopped covering, annotated on the diff. It cannot
+      # be the gate, because a flaky upload would then fail a run whose tests
+      # passed, and a badge that goes red for reasons unrelated to the code is
+      # a badge people stop reading.
+      - name: Upload coverage
+        uses: codecov/codecov-action@v7.0.0
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+          # Tokenless upload works for public repositories but is rate limited;
+          # set CODECOV_TOKEN in repository secrets to make it reliable. Absent
+          # the secret this still works, just less dependably.
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   web:
     name: node ${{ matrix.node }}
@@ -76,6 +106,12 @@ jobs:
         node: ["20", "24"]
     steps:
       - uses: actions/checkout@v7
+        # No step here pushes, so the workflow token has no business sitting
+        # in `.git/config` for the rest of the job. Checkout persists it there
+        # by default, where anything that later archives the workspace -- an
+        # artifact upload, a cache save -- carries the credential out with it.
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:

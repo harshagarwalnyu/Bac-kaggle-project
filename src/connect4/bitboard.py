@@ -53,6 +53,7 @@ of a separate minimax with two mirrored branches.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 WIDTH = 7
@@ -330,7 +331,7 @@ class Position:
     # ------------------------------------------------------- interop / display
 
     @classmethod
-    def from_moves(cls, columns) -> Position:
+    def from_moves(cls, columns: Sequence[int]) -> Position:
         """Build a position by replaying a sequence of column indices.
 
         Rejects illegal input rather than silently producing a corrupt board:

@@ -31,6 +31,7 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class GameRecord:
         return json.dumps(asdict(self), separators=(",", ":"))
 
     @classmethod
-    def from_dict(cls, raw: dict) -> GameRecord:
+    def from_dict(cls, raw: dict[str, Any]) -> GameRecord:
         """Build a record from a decoded line, tolerating unknown extra keys.
 
         Forward compatibility is cheap here and the alternative is nasty: a
@@ -108,7 +109,7 @@ class GameHistory:
     def get(self, game_id: str) -> GameRecord | None:
         return next((g for g in self._games if g.id == game_id), None)
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         """Aggregate the score line, because "am I winning overall" is the
         question a player actually asks of a history list."""
         wins = sum(1 for g in self._games if g.winner and g.winner != g.bot_player)
@@ -207,8 +208,11 @@ class GameHistory:
             _log.warning("could not append game %s to %s: %s", record.id, self.path, error)
 
     def _load(self) -> None:
-        assert self.path is not None
-        if not self.path.exists():
+        # A plain guard rather than an assert. The only caller already checks
+        # the path, so this never fires -- but an assert that never fires is
+        # still an assert that `python -O` deletes, and the narrowing the type
+        # checker gets from it would go with it.
+        if self.path is None or not self.path.exists():
             return
         try:
             lines = self.path.read_text(encoding="utf-8").splitlines()
