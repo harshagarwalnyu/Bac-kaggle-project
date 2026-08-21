@@ -202,7 +202,7 @@ Keeping a table across moves is not free: entries from a shallower earlier
 search occupy it and get hit, and at a 1s clock the searches are not deep
 enough for genuine overlap to pay that back.
 
-But the clock alone does not explain it either. L5 to L6 is a 5.5 point
+But the clock alone does not explain it either. L5 to L6 is a 5.5-point
 separation and the clock recovers 2.5 of it; the table recovers −2.0; the two
 together recover all 5.5. The knobs are superadditive, which is the one
 reading consistent with both halves: a table across moves pays only once the

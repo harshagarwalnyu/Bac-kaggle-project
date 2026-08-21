@@ -223,16 +223,6 @@ def format_report(report: Report) -> str:
         f"  {'config':<10}{'clock':>8}{'table':>8}{'w-d-l':>10}{'points':>9}",
         "  " + "-" * 45,
     ]
-    for config in order:
-        record = table[config.name]
-        lines.append(
-            f"  {config.name:<10}"
-            f"{config.multiple:>7.0f}x"
-            f"{'kept' if config.persist else 'fresh':>8}"
-            f"{record!s:>10}"
-            f"{record.points:>6.1f}/{record.played}"
-        )
-
     asleep = [outcome for _, _, outcome in report.outcomes if was_suspended(outcome)]
     if asleep:
         # Above the scores, not below them, because it changes how to read the
@@ -246,7 +236,18 @@ def format_report(report: Report) -> str:
             ),
             "  Their wall clock is not search time, and any --max-seconds budget was",
             "  consumed by the sleep rather than by games.",
+            "",
         ]
+
+    for config in order:
+        record = table[config.name]
+        lines.append(
+            f"  {config.name:<10}"
+            f"{config.multiple:>7.0f}x"
+            f"{'kept' if config.persist else 'fresh':>8}"
+            f"{record!s:>10}"
+            f"{record.points:>6.1f}/{record.played}"
+        )
 
     floor = table["L5"].points
     ceiling = table["L6"].points

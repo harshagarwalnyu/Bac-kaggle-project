@@ -203,7 +203,10 @@ def test_the_report_says_so_before_it_shows_the_scores(monkeypatch):
 
     text = ablate.format_report(report)
     assert "12 of 12 games ran while the machine was suspended" in text
-    assert text.index("suspended") < text.index("did not separate")
+    # Against the first score row, not the closing line: the closing line
+    # comes after everything, so comparing with it would pass even with
+    # the warning buried at the bottom.
+    assert text.index("suspended") < text.index("  L5")
 
 
 def test_the_suspend_check_is_the_tournament_s_own():

@@ -24,7 +24,7 @@ from connect4.az.cache import CachedEvaluator
 from connect4.az.mcts import MCTSConfig
 from connect4.az.selfplay import SelfPlayConfig
 from connect4.az.selfplay import play_games as self_play
-from connect4.bitboard import WIDTH, Position
+from connect4.bitboard import HEIGHT, WIDTH, Position
 from connect4.engine import Engine
 
 
@@ -389,3 +389,13 @@ def test_openings_rejects_a_negative_count():
 def test_openings_rejects_a_zero_ply_request():
     with pytest.raises(ValueError, match="at least 1"):
         openings(4, 0)
+
+
+def test_openings_refuses_a_depth_no_game_can_reach():
+    """A full board is a finished game, so a 42-ply opening cannot exist.
+
+    Answering this by enumeration means walking the whole Connect 4 tree, so
+    the point of the check is that it returns rather than that it is correct.
+    """
+    with pytest.raises(ValueError, match="only 42 discs"):
+        openings(1, WIDTH * HEIGHT)

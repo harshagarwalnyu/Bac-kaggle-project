@@ -23,7 +23,7 @@ import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from connect4.bitboard import WIDTH, Position
+from connect4.bitboard import HEIGHT, WIDTH, Position
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -113,6 +113,18 @@ def openings(count: int, plies: int = 2) -> list[list[int]]:
         raise ValueError(f"plies must be at least 1, got {plies}")
     if count < 0:
         raise ValueError(f"count must not be negative, got {count}")
+    if plies >= WIDTH * HEIGHT:
+        # The board holds WIDTH * HEIGHT discs, and the move that places the
+        # last one ends the game, so a line this long is always terminal and
+        # never an opening. Worth saying up front rather than discovering by
+        # search: `_legal_openings` would answer the same question by walking
+        # the whole game tree, which is not a wait anyone should sit through.
+        # This rules out the impossible depths only; a merely deep request
+        # such as 20 plies is still enumerated, and still slow.
+        raise ValueError(
+            f"no opening can be {plies} plies long: the board holds only "
+            f"{WIDTH * HEIGHT} discs and the last one ends the game"
+        )
 
     order = sorted(range(WIDTH), key=lambda c: abs(c - WIDTH // 2))
     lines = list(itertools.islice(_legal_openings(plies, order), count))
