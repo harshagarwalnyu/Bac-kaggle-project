@@ -445,6 +445,17 @@ def test_an_immediate_win_is_never_missed(columns: list[int]) -> None:
             break
 
 
+def _immediate_threats(pos: Position) -> list[int]:
+    """Columns the opponent would win with *if it were their turn right now*.
+
+    Playable cells only. A cell the opponent wins on but that nothing can be
+    dropped into yet is not a threat and cannot be blocked -- it is a trap to
+    stay out of, which is the separate property below.
+    """
+    reachable = pos.possible_moves() & pos.opponent_winning_spots()
+    return [col for col in pos.legal_moves() if reachable & pos._landing_bit(col)]
+
+
 @given(move_sequences)
 @engine_settings
 def test_the_engine_blocks_a_single_immediate_threat(columns: list[int]) -> None:
@@ -458,12 +469,39 @@ def test_the_engine_blocks_a_single_immediate_threat(columns: list[int]) -> None
     for pos in _live_positions(columns):
         if any(pos.is_winning_move(col) for col in pos.legal_moves()):
             continue
-        threats = [
-            col for col in pos.legal_moves() if pos.played(col).is_winning_move(col)
-        ]
+        threats = _immediate_threats(pos)
         if len(threats) != 1:
             continue
         assert _fixed_depth_engine().analyse(pos).best_move == threats[0]
+        checked += 1
+        if checked == _POSITIONS_PER_EXAMPLE:
+            break
+
+
+@given(move_sequences)
+@engine_settings
+def test_the_engine_does_not_play_underneath_an_opponent_win(
+    columns: list[int],
+) -> None:
+    """It never fills the square below a cell the opponent wins on.
+
+    The trap the block property above is not about. Dropping a stone under an
+    opponent winning cell does not lose the game this move; it lifts them into
+    the win on the next one, which a shallow search will happily walk into if
+    it only ever looks for threats it can block.
+
+    Asserted only where a safe alternative exists: with every reply losing,
+    playing into the trap is as good as anything else and the engine is not
+    wrong to.
+    """
+    checked = 0
+    for pos in _live_positions(columns):
+        if any(pos.is_winning_move(col) for col in pos.legal_moves()):
+            continue
+        safe = pos.safe_moves()
+        if not safe or len(safe) == len(pos.legal_moves()):
+            continue
+        assert _fixed_depth_engine().analyse(pos).best_move in safe
         checked += 1
         if checked == _POSITIONS_PER_EXAMPLE:
             break
