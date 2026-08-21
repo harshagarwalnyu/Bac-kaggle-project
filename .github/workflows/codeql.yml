@@ -1,0 +1,69 @@
+# Semantic analysis of the whole tree, in both languages it is written in.
+#
+# CodeQL is not a linter and does not overlap much with ruff: it reasons about
+# paths through the program -- where a value entered, what it touched on the
+# way, where it left -- so the things it finds are the things a reading of a
+# single file cannot show. On a repository that accepts JSON from a browser and
+# writes a JSONL archive to disk, that is the interesting class of bug.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, because the query packs are updated far more often than this
+    # repository is. A finding that only exists because GitHub shipped a new
+    # query should still surface, and it will never surface on push alone.
+    - cron: "27 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyse:
+    name: ${{ matrix.language }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Writing the results into the Security tab is the entire point; without
+      # this the run succeeds and reports nothing anywhere anyone will look.
+      security-events: write
+      # Read-only counterparts CodeQL needs to resolve the workflow and the
+      # source it is analysing.
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The front end is vanilla JS with no build step, so it is analysed as
+        # source directly. `javascript-typescript` is one language to CodeQL,
+        # not two.
+        language: [python, javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v4.37.7
+        with:
+          languages: ${{ matrix.language }}
+          # `security-extended` over the default pack: the default is tuned to
+          # keep noise near zero on any repository at all, which on a small
+          # codebase means it finds nothing and proves nothing. Extended costs
+          # a few minutes and some false positives, and a false positive that
+          # gets read is worth more than a true positive that never ran.
+          queries: security-extended
+
+      # Neither language needs compiling: Python is interpreted and the web
+      # directory ships the source it runs. Autobuild would be a no-op with a
+      # chance of failing on the pyproject, so it is skipped deliberately.
+      - name: Analyse
+        uses: github/codeql-action/analyze@v4.37.7
+        with:
+          category: /language:${{ matrix.language }}

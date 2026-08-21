@@ -1,0 +1,95 @@
+# Pattern-level security scanning, and a gate on what new dependencies bring
+# with them.
+#
+# Separate from `codeql.yml` because the two answer different questions and
+# fail for unrelated reasons. CodeQL asks where a value can flow; Semgrep asks
+# whether a line matches a known-bad shape. Splitting them means a red badge
+# already says which kind of problem it is.
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Same reasoning as CodeQL: the rules move faster than the code.
+    - cron: "41 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+      contents: read
+
+    # The published image, rather than the action. `semgrep/semgrep-action` is
+    # archived, and every current recipe for it routes through Semgrep AppSec
+    # Platform, which wants an account and a `SEMGREP_APP_TOKEN`. The OSS
+    # engine and the public rule packs need neither.
+    container:
+      image: semgrep/semgrep:1.174.0
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Scan
+        # `--sarif` rather than a failing exit code. Semgrep's public packs are
+        # tuned for breadth across every framework they cover, so on any one
+        # repository a share of the hits will be irrelevant. Blocking the merge
+        # on that teaches people to bypass the job; filing it in the Security
+        # tab means it gets triaged instead of dismissed.
+        #
+        # `|| true` guards the exit code only. A crash still produces no SARIF,
+        # and the upload below fails loudly on a missing file.
+        run: |
+          semgrep scan \
+            --config=p/default \
+            --config=p/python \
+            --config=p/secrets \
+            --sarif --output=semgrep.sarif \
+            --metrics=off \
+            . || true
+
+      - name: Check the scan produced results
+        # Distinguishes "scanned, found nothing" from "never ran". Without this
+        # a crashed scanner and a clean repository look identical, which is the
+        # failure mode that makes a security job worthless.
+        run: |
+          test -s semgrep.sarif || { echo "semgrep produced no SARIF -- the scan did not run"; exit 1; }
+
+      - name: Upload to the Security tab
+        uses: github/codeql-action/upload-sarif@v4.37.7
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  dependency-review:
+    name: dependency review
+    runs-on: ubuntu-latest
+    # Pull requests only. The action diffs the dependency manifest against the
+    # base branch, and on a push to `main` there is no base to diff against.
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/dependency-review-action@v5.0.0
+        with:
+          # A new dependency carrying a high-severity advisory should stop the
+          # merge; the existing tree is a separate conversation and is not this
+          # job's to have.
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
