@@ -178,17 +178,48 @@ Connect 4 is solved — the first player wins by move 41 with perfect play. Skil
 is a separate mode rather than another notch on the dial, because what changes is
 the *budget*, not the move choice: twelve times the clock (`CONNECT4_TIME_LIMIT`
 is 1.0s, `CONNECT4_SOLVER_TIME_LIMIT` is 12.0s), and a transposition table that
-persists between moves. Consecutive searches in one game overlap enormously, so
-keeping the table turns each move into a continuation of the last rather than a
-fresh start. Entries are keyed by position, not by search, so the reuse is sound.
+persists between moves. Entries are keyed by position, not by search, so the
+reuse is sound. Whether the reuse is *worth* anything is measured below, and
+the answer is less obvious than it looks.
 
-Which of the two knobs actually buys the strength is a fair question and
-`scripts/ablate.py` exists to answer it — it crosses the two and plays the four
-resulting configurations against each other. At a scaled-down clock the clock
-wins that comparison and the table contributes nothing measurable, but that run
-is a hostile test for the table: search overlap between consecutive moves is
-precisely what a persistent table sells, and overlap grows with the budget. Run
-it at `--time 1.0` before believing either answer.
+Which of the two knobs actually buys the strength was, for a long time, a
+comment asserting the table was the bigger of the two. `scripts/ablate.py`
+crosses the knobs and plays the four resulting configurations against each
+other, and it has now been run at the shipped clock — 3 openings, both seats,
+36 games, `--time 1.0`:
+
+| config | clock | table | w-d-l | points |
+|---|---|---|---|---|
+| L5 | 1× | fresh | 7-1-10 | 7.5/18 |
+| clock | 12× | fresh | 10-0-8 | 10.0/18 |
+| **table** | 1× | kept | 5-1-12 | **5.5/18** |
+| L6 | 12× | kept | 13-0-5 | 13.0/18 |
+
+**The old comment was wrong, and so was the obvious replacement for it.** The
+persistent table on its own does not merely fail to explain difficulty 6's
+strength — it scores *below* the configuration it was supposed to improve.
+Keeping a table across moves is not free: entries from a shallower earlier
+search occupy it and get hit, and at a 1s clock the searches are not deep
+enough for genuine overlap to pay that back.
+
+But the clock alone does not explain it either. L5 to L6 is a 5.5 point
+separation and the clock recovers 2.5 of it; the table recovers −2.0; the two
+together recover all 5.5. The knobs are superadditive, which is the one
+reading consistent with both halves: a table across moves pays only once the
+searches are deep enough to overlap, and twelve times the clock is what makes
+them deep enough. Neither knob is the answer. The interaction is.
+
+Read with the sample in mind: ±2.1 points of standard error on each score at
+18 games per config, so the clock-versus-table difference is about 1.5 standard
+errors — suggestive, not settled. The L5-to-L6 gap itself is about 2.6, which
+is the part worth trusting.
+
+One footnote on the timings, because it cost a night to learn: the script
+records CPU time beside the wall clock and flags any game where the two
+diverge. An earlier overnight run reported a normal 38-ply game at 24,032
+seconds, which is a laptop entering modern standby — Windows suspends the
+process without stopping `perf_counter`. Since `--max-seconds` is a wall-clock
+budget, a suspend spends the budget without playing anything.
 
 It does **not** claim a solve from the empty board — proving that takes billions of
 nodes, which CPython is not going to do inside a web request. Walking a full game

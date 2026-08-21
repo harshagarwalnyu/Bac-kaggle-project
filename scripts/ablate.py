@@ -3,11 +3,22 @@
 ``api.py`` builds difficulty 6 with two changes over difficulty 5 -- twelve
 times the time limit, and a transposition table that survives between moves.
 A comment beside it used to assert the table was "the bigger of the two".
-That is a plausible claim: consecutive searches in one game really do overlap
-enormously, so a kept table really should turn each move into a continuation
-of the last rather than a fresh start. But it was never measured, and an
-unmeasured claim in shipped code is a guess wearing a lab coat, so the comment
-now points here instead. This script is what gets to answer it.
+That is a plausible claim -- consecutive searches in one game really do
+overlap -- but it was never measured, and an unmeasured claim in shipped code
+is a guess wearing a lab coat. This script measured it, and the guess was
+wrong twice over.
+
+At the shipped clock, over 36 games (`checkpoints/ablation/solver-1s.log`):
+the kept table *on its own* scores 5.5/18 against difficulty 5's 7.5/18. Not
+"contributes less than the clock" -- worse than not having it. A table carried
+across moves costs something, and a 1s search is not deep enough for the
+overlap to pay it back. The clock on its own scores 10.0/18, which is better
+but still recovers under half the gap to difficulty 6's 13.0/18.
+
+So neither knob is the answer: +2.5 and -2.0 separately, +5.5 together. The
+pair is superadditive, which is the only reading consistent with both halves.
+A kept table pays once searches are deep enough to overlap, and twelve times
+the clock is what makes them deep enough.
 
 So: cross the two knobs and play the four resulting configurations against
 each other.
@@ -18,8 +29,8 @@ each other.
     slow + kept    the difficulty 6 configuration
 
 The reading that matters is not who wins overall -- ``slow + kept`` will --
-but which single knob recovers more of the gap from ``fast + fresh``. If the
-comment is right, ``fast + kept`` outscores ``slow + fresh``.
+but how much of the gap from ``fast + fresh`` each single knob recovers, and
+whether the two shares add up to the whole. They do not.
 
 Same discipline as the tournament, for the same reasons: the engine is
 deterministic, so variation comes from a fixed-seed set of openings rather
