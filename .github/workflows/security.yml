@@ -35,11 +35,28 @@ jobs:
     # archived, and every current recipe for it routes through Semgrep AppSec
     # Platform, which wants an account and a `SEMGREP_APP_TOKEN`. The OSS
     # engine and the public rule packs need neither.
+    #
+    # Pinned by digest, not by tag. A tag is a pointer the publisher can move,
+    # and a scanner is exactly the wrong place to accept a silently different
+    # binary: it runs on every push with the repository checked out. The digest
+    # below is the multi-arch image index for 1.174.0, read from the registry
+    # rather than copied from anywhere. To move it:
+    #
+    #   crane digest semgrep/semgrep:<version>
+    #
+    # The tag stays in the comment because a bare sha256 tells a reader nothing
+    # about how old it is.
     container:
-      image: semgrep/semgrep:1.174.0
+      image: semgrep/semgrep@sha256:f1f7b71861c7b28b6e0f661225a2c4f58a484f5d0f182465c6d6b3b22f972ade
 
     steps:
       - uses: actions/checkout@v7.0.1
+        # No step here pushes, so the workflow token has no business sitting
+        # in `.git/config` for the rest of the job. Checkout persists it there
+        # by default, where anything that later archives the workspace -- an
+        # artifact upload, a cache save -- carries the credential out with it.
+        with:
+          persist-credentials: false
 
       - name: Scan
         # `--sarif` rather than a failing exit code. Semgrep's public packs are
@@ -85,28 +102,49 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        # No step here pushes, so the workflow token has no business sitting
+        # in `.git/config` for the rest of the job. Checkout persists it there
+        # by default, where anything that later archives the workspace -- an
+        # artifact upload, a cache save -- carries the credential out with it.
+        with:
+          persist-credentials: false
 
-      - uses: actions/dependency-review-action@v5.0.0
-        # Non-blocking, and only until someone turns the feature on. The action
-        # reads GitHub's dependency graph rather than the lockfile, so with the
-        # graph disabled it cannot run at all:
+      - name: Is the dependency graph switched on?
+        # The action reads GitHub's dependency graph, not the lockfile, and
+        # with the graph disabled it does not degrade -- it fails outright:
         #
         #   Dependency review is not supported on this repository. Please
         #   ensure that Dependency graph is enabled
         #
-        # That is a repository setting, not something a workflow can fix, and a
-        # check that is red for a reason no diff can address is a check people
-        # learn to scroll past -- which then hides the real advisory when one
-        # lands. Settings -> Code security -> Dependency graph -> Enable, then
-        # delete this line and `fail-on-severity` starts meaning something.
+        # That is a repository setting no workflow can change. The previous
+        # shape of this job was a blanket `continue-on-error: true` on the
+        # action, which did make the check green, but at the cost of swallowing
+        # every other failure with it -- including the one thing the job exists
+        # to catch, a new dependency carrying a high-severity advisory.
         #
-        # On the step rather than the job deliberately. Job-level
-        # `continue-on-error` keeps the *workflow* green but still reports the
-        # job's own conclusion as `failure`, so the check stays red on the pull
-        # request -- measured on run 32493231734, where the workflow succeeded
-        # and the job did not. On the step, the job succeeds and the log still
-        # carries the reason.
-        continue-on-error: true
+        # So ask first. The SBOM endpoint is the graph's own read API and
+        # returns 404 for exactly the repositories where the action cannot run,
+        # which turns "skip" into a decision with a reason rather than a
+        # blindfold. Once the graph is enabled the probe starts returning 200,
+        # the action runs, and `fail-on-severity` begins meaning something --
+        # with no edit to this file.
+        #
+        # Settings -> Code security -> Dependency graph -> Enable.
+        id: graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" --silent 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Dependency graph is disabled on this repository, so dependency review cannot run. Settings -> Code security -> Dependency graph -> Enable."
+          fi
+
+      - uses: actions/dependency-review-action@v5.0.0
+        # Blocking when it runs at all. No `continue-on-error`: the step above
+        # already removed the one failure that was never about the diff.
+        if: steps.graph.outputs.enabled == 'true'
         with:
           # A new dependency carrying a high-severity advisory should stop the
           # merge; the existing tree is a separate conversation and is not this

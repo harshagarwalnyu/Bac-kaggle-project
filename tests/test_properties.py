@@ -326,17 +326,37 @@ def test_mirroring_the_board_mirrors_every_answer(columns: list[int]) -> None:
     )
 
 
-@given(st.integers(min_value=0, max_value=(1 << 49) - 1))
-def test_has_alignment_only_sees_board_bits(bits: int) -> None:
-    """Sentinel bits must never be able to fake an alignment.
+def _bits_to_grid(bits: int) -> list[list[int]]:
+    """Render a raw occupancy integer the way :meth:`Position.to_grid` would.
 
-    The stride encoding is only sound because the sentinel row breaks vertical
-    and diagonal runs at the column boundary. Feeding in arbitrary integers is
-    the direct test of that: masking to the board first must not change the
-    answer for anything that was already a legal board.
+    One player only -- every set bit becomes a 1 -- because `has_alignment`
+    takes a single occupancy word and knows nothing about whose stones they
+    are. Sentinel bits are dropped, so a grid decoded here always describes a
+    board the encoding claims to support.
+    """
+    grid = [[0] * WIDTH for _ in range(HEIGHT)]
+    for col in range(WIDTH):
+        for row in range(HEIGHT):
+            if bits & (1 << (col * (HEIGHT + 1) + row)):
+                grid[HEIGHT - 1 - row][col] = 1
+    return grid
+
+
+@given(st.integers(min_value=0, max_value=(1 << 49) - 1))
+def test_has_alignment_agrees_with_the_grid_oracle(bits: int) -> None:
+    """Four shifts must find exactly what a nested loop over 42 cells finds.
+
+    Not restricted to reachable positions: `has_alignment` is asked about
+    hypothetical occupancies during the search, so it has to be right for any
+    arrangement of stones, floating ones included.
+
+    This is the direct test of the stride encoding. The sentinel row exists so
+    that a vertical or diagonal run cannot wrap from the top of one column into
+    the bottom of the next, and a wrap is precisely a case where the shifts
+    would report an alignment the grid does not have.
     """
     on_board = bits & BOARD_MASK
-    assert has_alignment(on_board) == has_alignment(on_board & BOARD_MASK)
+    assert has_alignment(on_board) == _naive_has_four(_bits_to_grid(on_board), 1)
 
 
 # ------------------------------------------------------------------ search
