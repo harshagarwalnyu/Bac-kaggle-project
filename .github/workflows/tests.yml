@@ -10,6 +10,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # 07:00 UTC (03:00 ET) nightly. Catches drift this repo cannot catch on
+    # its own: a moved action tag, a new ubuntu-latest image, a transitive
+    # dependency that changed under an unpinned constraint.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
 
 # Read-only: nothing here needs to write to the repository.
 permissions:
